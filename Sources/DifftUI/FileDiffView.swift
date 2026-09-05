@@ -1,0 +1,548 @@
+import SwiftUI
+import DifftCore
+import DifftServices
+
+public struct FileDiffView: View {
+    public let file: FileDiff
+    @Binding public var layout: DiffLayout
+    @Binding public var selection: LineSelection?
+    public let fontSize: Int
+    /// New-file line number to scroll to and select on appear (e.g. from a
+    /// findings click). Falls back to old-number matching for deletions.
+    public let focusLine: Int?
+    /// Called after the focus target has been applied so the owner can clear
+    /// it — otherwise a stale target re-fires on later file switches.
+    public var onFocused: () -> Void
+    public let comments: [ReviewComment]
+    public var onAsk: (String, String) -> Void  // (selectedText, contextChip)
+
+    // Old/new column balance, draggable via the center divider. Persisted
+    // globally (not per file) so it survives file switches and relaunches.
+    @AppStorage("diffSplitFraction") private var split = 0.5
+
+    fileprivate enum DiffItem: Identifiable, Sendable {
+        case hunkHeader(index: Int, text: String)
+        case row(SideBySideRow)
+        case comment(ReviewComment)
+        var id: String {
+            switch self {
+            case .hunkHeader(let i, _): return "h\(i)"
+            case .row(let r): return "r\(r.id)"
+            case .comment(let c): return "c\(c.id)"
+            }
+        }
+    }
+
+    fileprivate struct Built: Sendable {
+        var items: [DiffItem] = []
+        var allRows: [SideBySideRow] = []
+        var changeBlocks: [ChangeBlock] = []
+        var key = ""
+    }
+    /// Heavy row/anchor/rail construction, cached per (file, layout,
+    /// comments) — rebuilding it in init made every body re-evaluation
+    /// (each frame of the panel's width animation) an O(file) rebuild.
+    @State private var built = Built()
+
+    // Drag-to-select over rows: visible rows report their frames in the
+    // "diffSpace" coordinate space; a container-level drag maps y positions
+    // back to row ids.
+    @State private var rowFrames: [Int: CGRect] = [:]
+    @State private var dragAnchorRow: Int?
+
+    public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
+    public var onResolveComment: (ReviewComment) -> Void = { _ in }
+
+    public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
+                fontSize: Int = 12, focusLine: Int? = nil, comments: [ReviewComment] = [],
+                onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
+                onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
+                onResolveComment: @escaping (ReviewComment) -> Void = { _ in }) {
+        self.onReplyComment = onReplyComment
+        self.onResolveComment = onResolveComment
+        self.file = file; self._layout = layout; self._selection = selection
+        self.fontSize = fontSize; self.focusLine = focusLine
+        self.onFocused = onFocused; self.onAsk = onAsk
+        self.comments = comments
+    }
+
+
+    nonisolated fileprivate static func build(file: FileDiff, sideBySide: Bool,
+                                  comments: [ReviewComment], key: String) -> Built {
+        var items: [DiffItem] = []
+        var rows: [SideBySideRow] = []
+        var base = 0
+        // A full-context diff is one hunk spanning the whole file; its @@
+        // header is noise there.
+        let fullFile = file.hunks.count == 1
+            && (file.hunks[0].lines.first.flatMap { $0.oldNumber ?? $0.newNumber } ?? 0) <= 1
+        for (i, hunk) in file.hunks.enumerated() {
+            if !fullFile { items.append(.hunkHeader(index: i, text: hunk.header)) }
+            let local = sideBySide ? RowPairer.rows(for: [hunk]) : RowPairer.unifiedRows(for: [hunk])
+            for r in local {
+                let remapped = SideBySideRow(id: base + r.id, left: r.left, right: r.right)
+                items.append(.row(remapped))
+                rows.append(remapped)
+            }
+            base += local.count
+        }
+        // Anchor review comments under their row: LEFT comments match old
+        // line numbers, RIGHT (the default) match new ones. Outdated comments
+        // with no line are skipped.
+        for c in comments {
+            guard let line = c.line else { continue }
+            let matches: (SideBySideRow) -> Bool = c.side == "LEFT"
+                ? { $0.left?.oldNumber == line || $0.right?.oldNumber == line }
+                : { $0.right?.newNumber == line || $0.left?.newNumber == line }
+            guard let row = rows.first(where: matches),
+                  let idx = items.firstIndex(where: { $0.id == "r\(row.id)" }) else { continue }
+            var insertAt = idx + 1
+            while insertAt < items.count, case .comment = items[insertAt] { insertAt += 1 }
+            items.insert(.comment(c), at: insertAt)
+        }
+        // Runs of consecutive changed rows for the overview rail.
+        var blocks: [ChangeBlock] = []
+        let total = CGFloat(max(rows.count, 1))
+        var i = 0
+        while i < rows.count {
+            let kind = ChangeBlock.kind(of: rows[i])
+            if kind == nil { i += 1; continue }
+            let start = i
+            var hasAdd = false, hasDel = false
+            while i < rows.count, let k = ChangeBlock.kind(of: rows[i]) {
+                hasAdd = hasAdd || k == .addition
+                hasDel = hasDel || k == .deletion || rows[i].left?.kind == .deletion
+                i += 1
+            }
+            let color: Color = (hasAdd && hasDel) ? .orange : hasDel ? .red : .green
+            blocks.append(ChangeBlock(rowID: rows[start].id,
+                                      fraction: CGFloat(start) / total,
+                                      extent: CGFloat(i - start) / total,
+                                      color: color))
+        }
+        return Built(items: items, allRows: rows, changeBlocks: blocks, key: key)
+    }
+
+    private var buildKey: String { "\(file.path)|\(layout)|\(comments.count)" }
+
+    public var body: some View {
+        switch file.kind {
+        case .binary:
+            ContentUnavailableView("Binary file", systemImage: "doc.zipper",
+                                   description: Text(file.path))
+        default:
+            GeometryReader { geo in
+                let widths = columnWidths(paneWidth: geo.size.width)
+                let leftW = widths.left
+                let rightW = widths.right
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(built.items) { item in
+                                switch item {
+                                case .hunkHeader(_, let text):
+                                    HunkHeaderView(text: text, fontSize: fontSize)
+                                case .comment(let c):
+                                    CommentCardView(comment: c,
+                                                    onReply: { body in onReplyComment(c, body) },
+                                                    onResolve: { onResolveComment(c) })
+                                case .row(let row):
+                                    DiffRowView(row: row, layout: layout,
+                                                language: HighlightService.language(forPath: file.path),
+                                                isSelected: selection.map { $0.range.contains(row.id) } ?? false,
+                                                fontSize: fontSize,
+                                                leftCodeWidth: leftW,
+                                                rightCodeWidth: rightW,
+                                                onGutterClick: { id, shift in
+                                                    selection = SelectionLogic.click(current: selection, rowID: id, extending: shift)
+                                                },
+                                                onContextAsk: { id in askAbout(rowID: id) },
+                                                onContextCopy: { id in copyRows(rowID: id) })
+                                        .id(item.id)
+                                        .background(GeometryReader { rowGeo in
+                                            Color.clear.preference(
+                                                key: RowFramesKey.self,
+                                                value: [row.id: rowGeo.frame(in: .named("diffSpace"))])
+                                        })
+                                }
+                            }
+                        }
+                        .frame(width: geo.size.width, alignment: .leading)
+                        .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
+                    }
+                    .coordinateSpace(name: "diffSpace")
+                    // Mouse drag over rows extends the selection line by line
+                    // (trackpad two-finger scrolling is a scroll event, not a
+                    // drag, so this doesn't fight vertical scrolling).
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 6, coordinateSpace: .named("diffSpace"))
+                            .onChanged { value in
+                                if dragAnchorRow == nil {
+                                    dragAnchorRow = rowID(atY: value.startLocation.y)
+                                }
+                                guard let anchor = dragAnchorRow,
+                                      let head = rowID(atY: value.location.y) else { return }
+                                selection = LineSelection(anchor: anchor, head: head)
+                            }
+                            .onEnded { _ in dragAnchorRow = nil }
+                    )
+                    .overlay(alignment: .trailing) {
+                        // No rail when changes blanket the file (e.g. a fully
+                        // added file) — a wall-to-wall tick navigates nothing.
+                        if !built.changeBlocks.isEmpty,
+                           built.changeBlocks.reduce(0, { $0 + $1.extent }) < 0.9 {
+                            ChangeRailView(blocks: built.changeBlocks) { rowID in
+                                withAnimation { proxy.scrollTo("r\(rowID)", anchor: .center) }
+                            }
+                        }
+                    }
+                    // Rows build asynchronously: applying focus on appear ran
+                    // against an empty row set and silently did nothing. Apply
+                    // it whenever the built rows (or the target) change.
+                    .onChange(of: built.key, initial: true) { _, _ in
+                        guard !built.allRows.isEmpty else { return }
+                        if focusLine != nil {
+                            focusIfNeeded(proxy)
+                        } else {
+                            scrollToFirstChange(proxy)
+                        }
+                    }
+                    .onChange(of: focusLine) { focusIfNeeded(proxy) }
+                }
+                .overlay {
+                    if layout == .sideBySide, let leftW = leftW {
+                        // Anchored to the REAL divider x (left gutter + left column),
+                        // which differs from paneWidth*split when widths clamp.
+                        SplitHandle(split: $split, paneWidth: geo.size.width,
+                                    dividerX: leftW + 53 + 0.5)
+                    }
+                }
+            }
+            .copyable(selection.map { [SelectionLogic.selectedText(rows: built.allRows, selection: $0)] } ?? [])
+            .task(id: buildKey) {
+                // Off the main actor: a big file builds in background and pops
+                // in; body evaluations stay cheap in the meantime.
+                let f = file, side = layout == .sideBySide, cs = comments, key = buildKey
+                guard built.key != key else { return }
+                built = await Task.detached(priority: .userInitiated) {
+                    Self.build(file: f, sideBySide: side, comments: cs, key: key)
+                }.value
+                if focusLine != nil { /* focus re-applied by focusIfNeeded below via onAppear path */ }
+            }
+            .overlay {
+                if built.key.isEmpty {
+                    ProgressView().controlSize(.small)
+                }
+            }
+        }
+    }
+
+    /// Right-click "Ask Claude": acts on the current multi-line selection when
+    /// the clicked row is inside it, otherwise on the clicked row alone.
+    private func effectiveSelection(for rowID: Int) -> LineSelection {
+        if let sel = selection, sel.range.contains(rowID) { return sel }
+        let sel = LineSelection(anchor: rowID, head: rowID)
+        selection = sel
+        return sel
+    }
+
+    private func askAbout(rowID: Int) {
+        let sel = effectiveSelection(for: rowID)
+        onAsk(SelectionLogic.selectedText(rows: built.allRows, selection: sel),
+              SelectionLogic.contextChip(path: file.path, rows: built.allRows, selection: sel))
+    }
+
+    private func copyRows(rowID: Int) {
+        let sel = effectiveSelection(for: rowID)
+        let text = SelectionLogic.selectedText(rows: built.allRows, selection: sel)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func columnWidths(paneWidth: CGFloat) -> (left: CGFloat?, right: CGFloat?) {
+        guard layout == .sideBySide else { return (nil, nil) }
+        let gutter: CGFloat = 44 + 8 + 1
+        let left = max(80, paneWidth * CGFloat(split) - gutter)
+        let right = max(80, paneWidth * CGFloat(1 - split) - gutter - 1)
+        return (left, right)
+    }
+
+    /// Full-file diffs open on the first changed row rather than line 1.
+    private func scrollToFirstChange(_ proxy: ScrollViewProxy) {
+        guard let row = built.allRows.first(where: { ($0.left?.kind ?? $0.right?.kind) != .context
+            || ($0.right?.kind ?? $0.left?.kind) != .context }) else { return }
+        guard row.id > 10 else { return }  // change is near the top already
+        proxy.scrollTo("r\(row.id)", anchor: UnitPoint(x: 0, y: 0.25))
+    }
+
+    /// Row under a y position in "diffSpace", nearest match when between rows.
+    private func rowID(atY y: CGFloat) -> Int? {
+        if let hit = rowFrames.first(where: { $0.value.minY <= y && y < $0.value.maxY }) {
+            return hit.key
+        }
+        return rowFrames.min(by: { abs($0.value.midY - y) < abs($1.value.midY - y) })?.key
+    }
+
+    /// Scroll to and select the row matching `focusLine` (new-file number
+    /// first, old-file as fallback so deleted lines resolve too).
+    private func focusIfNeeded(_ proxy: ScrollViewProxy) {
+        guard let line = focusLine else { return }
+        let row = built.allRows.first { ($0.right ?? $0.left)?.newNumber == line }
+            ?? built.allRows.first { ($0.left ?? $0.right)?.oldNumber == line }
+        guard let row else { return }
+        selection = LineSelection(anchor: row.id, head: row.id)
+        withAnimation { proxy.scrollTo("r\(row.id)", anchor: .center) }
+        onFocused()
+    }
+}
+
+/// Markdown-ish body shared by chat messages and comment cards: prose with
+/// inline markdown, fenced code blocks monospaced and syntax-highlighted
+/// (language auto-detected).
+public struct MarkdownBodyView: View {
+    public let text: String
+    @EnvironmentObject var highlighter: HighlightService
+
+    public init(text: String) { self.text = text }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(CommentBodySegment.parse(text).enumerated()), id: \.offset) { _, seg in
+                switch seg {
+                case .text(let t):
+                    // Split out markdown heading lines (inline-only parsing
+                    // would show the ### literally).
+                    ForEach(Array(Self.headingChunks(t).enumerated()), id: \.offset) { _, chunk in
+                        if chunk.isHeading {
+                            Text(chunk.text)
+                                .font(.headline)
+                                .padding(.top, 4)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text((try? AttributedString(markdown: chunk.text,
+                                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(chunk.text))
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                case .code(let c):
+                    ScrollView(.horizontal) {
+                        Text(highlighter.highlightedAuto(c))
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(8)
+                    }
+                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+}
+
+extension MarkdownBodyView {
+    struct Chunk { let text: String; let isHeading: Bool }
+    /// Splits prose into heading lines (#, ##, ###…) and paragraph runs.
+    static func headingChunks(_ text: String) -> [Chunk] {
+        var chunks: [Chunk] = []
+        var para: [String] = []
+        func flush() {
+            let t = para.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { chunks.append(Chunk(text: t, isHeading: false)) }
+            para = []
+        }
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#"), let range = trimmed.range(of: "^#{1,6} +", options: .regularExpression) {
+                flush()
+                chunks.append(Chunk(text: String(trimmed[range.upperBound...]), isHeading: true))
+            } else {
+                para.append(line)
+            }
+        }
+        flush()
+        return chunks
+    }
+}
+
+/// Inline review-comment card, IntelliJ-style: author, age, body with fenced
+/// code blocks rendered as code, plus Reply and Resolve actions.
+struct CommentCardView: View {
+    let comment: ReviewComment
+    var onReply: (String) -> Void = { _ in }
+    var onResolve: () -> Void = {}
+    @State private var replying = false
+    @State private var replyText = ""
+
+    private var age: String {
+        let fmt = ISO8601DateFormatter()
+        guard let date = fmt.date(from: comment.createdAt) else { return "" }
+        let rel = RelativeDateTimeFormatter()
+        rel.unitsStyle = .abbreviated
+        return rel.localizedString(for: date, relativeTo: Date())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: comment.inReplyToID == nil ? "bubble.left" : "arrow.turn.down.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text(comment.author).font(.callout.bold())
+                Text(age).font(.caption).foregroundStyle(.secondary)
+                if comment.resolved {
+                    Label("Resolved", systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+            }
+
+            MarkdownBodyView(text: comment.body)
+
+            HStack(spacing: 12) {
+                Button(replying ? "Cancel" : "Reply") {
+                    replying.toggle()
+                    replyText = ""
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+                if comment.inReplyToID == nil, comment.threadID != nil, !comment.resolved {
+                    Button("Resolve") { onResolve() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+            if replying {
+                HStack {
+                    TextField("Reply…", text: $replyText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { submitReply() }
+                    Button("Send") { submitReply() }
+                        .disabled(replyText.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(comment.resolved ? 0.3 : 0.6), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.primary.opacity(0.1))
+        }
+        .opacity(comment.resolved ? 0.75 : 1)
+        .padding(.vertical, 4)
+        .padding(.leading, comment.inReplyToID == nil ? 60 : 84)
+        .padding(.trailing, 16)
+        .frame(maxWidth: 760, alignment: .leading)
+    }
+
+    private func submitReply() {
+        let text = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        onReply(text)
+        replying = false
+        replyText = ""
+    }
+
+}
+
+/// One run of changed rows, positioned as a fraction of the file.
+struct ChangeBlock: Equatable {
+    let rowID: Int
+    let fraction: CGFloat
+    let extent: CGFloat
+    let color: Color
+
+    static func kind(of row: SideBySideRow) -> LineKind? {
+        let l = row.left?.kind, r = row.right?.kind
+        if r == .addition || l == .addition { return .addition }
+        if l == .deletion || r == .deletion { return .deletion }
+        if l == nil || r == nil { return .addition }  // filler side of a change
+        return nil
+    }
+}
+
+/// IntelliJ-style change-overview rail: ticks mark where changes live in the
+/// whole file; clicking one jumps the diff there.
+struct ChangeRailView: View {
+    let blocks: [ChangeBlock]
+    let onJump: (Int) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                Color.primary.opacity(0.04)
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(block.color.opacity(0.85))
+                        .frame(width: 7, height: max(3, block.extent * geo.size.height))
+                        .offset(x: 2.5, y: block.fraction * geo.size.height)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { location in
+                let ratio = location.y / max(geo.size.height, 1)
+                if let nearest = blocks.min(by: {
+                    abs($0.fraction + $0.extent / 2 - ratio) < abs($1.fraction + $1.extent / 2 - ratio)
+                }) {
+                    onJump(nearest.rowID)
+                }
+            }
+        }
+        .frame(width: 12)
+        .accessibilityLabel("Change overview")
+    }
+}
+
+private struct RowFramesKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] { [:] }
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+/// Full-height strip over the center divider that drags the old/new column
+/// balance. Uses absolute cursor position (not translation) so the divider
+/// lands exactly under the pointer, and a high-priority gesture so the
+/// ScrollView's pan can't swallow the drag.
+private struct SplitHandle: View {
+    @Binding var split: Double
+    let paneWidth: CGFloat
+    let dividerX: CGFloat
+    @State private var hovering = false
+    @State private var dragging = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // Accent only while actively dragging: hover state can stick
+                // when the exit event is lost (focus switches), which left a
+                // bright blue line down the middle.
+                Rectangle()
+                    .fill(dragging ? Color.accentColor.opacity(0.5)
+                          : hovering ? Color.primary.opacity(0.25) : Color.clear)
+                    .frame(width: (hovering || dragging) ? 3 : 1)
+            }
+            .frame(width: 17, height: geo.size.height)
+            .contentShape(Rectangle())
+            .position(x: dividerX, y: geo.size.height / 2)
+            .highPriorityGesture(
+                // `.position` wraps the strip in a full-pane frame, so the
+                // gesture's .local space IS the pane: location.x maps straight
+                // to the desired split.
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        dragging = true
+                        split = min(0.75, max(0.25, value.location.x / paneWidth))
+                    }
+                    .onEnded { _ in dragging = false }
+            )
+            .onHover { inside in
+                hovering = inside
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+        }
+        .allowsHitTesting(true)
+    }
+}
