@@ -9,7 +9,13 @@ final class AppModel: ObservableObject {
     }
     @Published var prs: [PullRequest] = []
     @Published var session: ReviewSession?
-    @Published var files: [FileDiff] = []
+    @Published var files: [FileDiff] = [] {
+        // The tree is derived purely from `files`, but the sidebar rebuilt it
+        // inside its `body` — so every file click, refresh flag and agent
+        // status change paid for a full rebuild. Derive it once, here.
+        didSet { fileTree = FileTreeNode.build(from: files) }
+    }
+    @Published private(set) var fileTree: [FileTreeNode] = []
     @Published var comments: [ReviewComment] = []
     @Published var commits: [Commit] = []
     /// Files changed by the single commit currently drilled into, kept apart

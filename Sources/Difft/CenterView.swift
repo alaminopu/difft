@@ -56,10 +56,10 @@ struct FileHeaderBar: View {
             Image(systemName: "doc.text")
                 .foregroundStyle(.secondary)
                 .imageScale(.small)
-            Text(name).font(.callout.monospaced().bold())
+            Text(name).font(Typography.fileName)
             if !dir.isEmpty {
                 Text(dir)
-                    .font(.caption.monospaced())
+                    .font(Typography.path)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -176,7 +176,7 @@ struct FileDiffContainer: View {
     @ObservedObject var session: ReviewSession
     @State private var layout: DiffLayout = .sideBySide
     @State private var selection: LineSelection?
-    @AppStorage("diffFontSize") private var fontSize = 12
+    @AppStorage(PrefKey.diffFontSize) private var fontSize = DiffMetrics.defaultFontSize
     var onAsk: (String, String) -> Void
 
     var body: some View {
@@ -213,7 +213,8 @@ struct FileDiffContainer: View {
                     Picker("Layout", selection: $layout) {
                         ForEach(DiffLayout.allCases, id: \.self) { Text($0.rawValue) }
                     }.pickerStyle(.segmented)
-                    Stepper("Font \(fontSize)pt", value: $fontSize, in: 9...18)
+                    Stepper("Font \(fontSize)pt", value: $fontSize,
+                            in: DiffMetrics.minFontSize...DiffMetrics.maxFontSize)
                 }
         } else {
             PROverviewView(session: session)
@@ -253,7 +254,7 @@ struct MainSplitView: View {
                 HSplitView {
                     VStack(spacing: 0) {
                         if let banner = model.errorBanner {
-                            Text(banner).foregroundStyle(.white).padding(6)
+                            Text(banner).foregroundStyle(Color.white).padding(Spacing.sm - 2)
                                 .frame(maxWidth: .infinity).background(.red)
                         }
                         CenterView { text, chip in

@@ -81,7 +81,7 @@ struct PRCommentsView: View {
                 Divider().frame(height: 14)
                 Image(systemName: "bubble.left.and.bubble.right")
                     .foregroundStyle(.secondary)
-                Text("Review comments").font(.headline)
+                Text("Review comments").font(Typography.sectionTitle)
                 Text(verbatim: "\(threads.count) thread\(threads.count == 1 ? "" : "s")")
                     .font(.callout).foregroundStyle(.secondary)
                 if unresolved > 0 {
@@ -172,9 +172,9 @@ struct PRCommentsView: View {
         let dir = path.split(separator: "/").dropLast().joined(separator: "/")
         return HStack(spacing: 6) {
             Image(systemName: "doc.text").imageScale(.small).foregroundStyle(.secondary)
-            Text(name).font(.callout.monospaced().bold())
+            Text(name).font(Typography.fileName)
             if !dir.isEmpty {
-                Text(dir).font(.caption.monospaced()).foregroundStyle(.tertiary)
+                Text(dir).font(Typography.path).foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.middle)
             }
             Text(verbatim: "\(count)")
@@ -250,7 +250,7 @@ struct CommentThreadCard: View {
         .padding(12)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
         .overlay {
-            RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.cardBorder)
         }
     }
 }
@@ -260,13 +260,17 @@ struct CommentThreadCard: View {
 struct DiffHunkPreview: View {
     let hunk: String
     private static let maxLines = 6
+    @AppStorage(PrefKey.codeFontFamily) private var codeFontFamily = CodeFont.systemFamily
+    @AppStorage(PrefKey.diffFontSize) private var diffFontSize = DiffMetrics.defaultFontSize
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let lines = hunk.components(separatedBy: "\n").suffix(Self.maxLines)
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                 Text(line.isEmpty ? " " : line)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Typography.code(family: codeFontFamily,
+                                          size: CGFloat(diffFontSize) - 1))
                     .foregroundStyle(color(for: line))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8).padding(.vertical, 1)
@@ -275,19 +279,20 @@ struct DiffHunkPreview: View {
             }
         }
         .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
     }
 
     private func color(for line: String) -> Color {
         if line.hasPrefix("@@") { return .secondary }
-        if line.hasPrefix("+") { return .green }
-        if line.hasPrefix("-") { return .red }
+        if line.hasPrefix("+") { return Palette.added }
+        if line.hasPrefix("-") { return Palette.removed }
         return .primary.opacity(0.8)
     }
 
     private func background(for line: String) -> Color {
-        if line.hasPrefix("+") { return .green.opacity(0.12) }
-        if line.hasPrefix("-") { return .red.opacity(0.12) }
+        let dark = colorScheme == .dark
+        if line.hasPrefix("+") { return Palette.diffAddFill(dark) }
+        if line.hasPrefix("-") { return Palette.diffRemoveFill(dark) }
         return .clear
     }
 }

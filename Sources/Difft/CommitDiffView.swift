@@ -16,7 +16,7 @@ struct CommitDiffView: View {
 
     @State private var layout: DiffLayout = .sideBySide
     @State private var selection: LineSelection?
-    @AppStorage("diffFontSize") private var fontSize = 12
+    @AppStorage(PrefKey.diffFontSize) private var fontSize = DiffMetrics.defaultFontSize
 
     private var age: String {
         guard let date = ISO8601DateFormatter().date(from: commit.date) else { return "" }
@@ -130,7 +130,8 @@ struct CommitDiffView: View {
             Picker("Layout", selection: $layout) {
                 ForEach(DiffLayout.allCases, id: \.self) { Text($0.rawValue) }
             }.pickerStyle(.segmented)
-            Stepper("Font \(fontSize)pt", value: $fontSize, in: 9...18)
+            Stepper("Font \(fontSize)pt", value: $fontSize,
+                            in: DiffMetrics.minFontSize...DiffMetrics.maxFontSize)
         }
     }
 
@@ -147,6 +148,7 @@ struct CommitDiffView: View {
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(spacing: 6) {
                                 Text(name)
+                                    .font(Typography.fileName)
                                     .lineLimit(1).truncationMode(.middle)
                                     .foregroundStyle(isSelected ? Color.accentColor : .primary)
                                 Spacer(minLength: 4)
@@ -157,7 +159,7 @@ struct CommitDiffView: View {
                             }
                             if !dir.isEmpty {
                                 Text(dir)
-                                    .font(.caption2.monospaced())
+                                    .font(Typography.path)
                                     .foregroundStyle(.tertiary)
                                     .lineLimit(1).truncationMode(.head)
                             }

@@ -14,5 +14,6 @@ let package = Package(
         .executableTarget(name: "Difft", dependencies: ["DifftCore", "DifftServices", "DifftUI"]),
         .testTarget(name: "DifftCoreTests", dependencies: ["DifftCore"]),
         .testTarget(name: "DifftServicesTests", dependencies: ["DifftServices"]),
+        .testTarget(name: "DifftUITests", dependencies: ["DifftUI"]),
     ]
 )

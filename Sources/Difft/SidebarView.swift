@@ -1,6 +1,7 @@
 import SwiftUI
 import DifftCore
 import DifftServices
+import DifftUI
 
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
@@ -199,7 +200,7 @@ struct FileTreeView: View {
 
     var body: some View {
         let viewed = session.data.viewedFiles
-        let tree = FileTreeNode.build(from: model.files)
+        let tree = model.fileTree
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Button {
@@ -296,6 +297,7 @@ private struct FileTreeNodeView: View {
                         .labelsHidden().toggleStyle(.checkbox)
                         .controlSize(.small)
                     Text(node.name)
+                        .font(Typography.fileName)
                         .lineLimit(1).truncationMode(.middle)
                         .foregroundStyle(isViewed ? .secondary :
                             (session.selectedFile == file.path ? Color.accentColor : .primary))

@@ -44,9 +44,34 @@ public struct FileDiff: Equatable, Identifiable, Sendable {
     public let path: String
     public let kind: FileChangeKind
     public let hunks: [Hunk]
-    public var additions: Int { hunks.flatMap(\.lines).filter { $0.kind == .addition }.count }
-    public var deletions: Int { hunks.flatMap(\.lines).filter { $0.kind == .deletion }.count }
+
+    /// Counted once at construction rather than derived on each access.
+    ///
+    /// The file tree reads these several times per row and the PR overview
+    /// sums them across every file, on every body evaluation. As computed
+    /// properties — each a `flatMap` allocating an array of every line in the
+    /// file — that cost ~10ms per sidebar pass on a 71-file PR. With
+    /// full-context diffs a FileDiff holds the whole file, not just the
+    /// changed hunks, so the walk is over everything.
+    public let additions: Int
+    public let deletions: Int
+    /// Widest line number the gutter has to show, so its width can be derived
+    /// from the file rather than guessed at a fixed size.
+    public let maxLineNumber: Int
+
     public init(path: String, kind: FileChangeKind, hunks: [Hunk]) {
         self.path = path; self.kind = kind; self.hunks = hunks
+        var adds = 0, dels = 0, maxLine = 0
+        for hunk in hunks {
+            for line in hunk.lines {
+                switch line.kind {
+                case .addition: adds += 1
+                case .deletion: dels += 1
+                case .context: break
+                }
+                maxLine = max(maxLine, line.oldNumber ?? 0, line.newNumber ?? 0)
+            }
+        }
+        self.additions = adds; self.deletions = dels; self.maxLineNumber = maxLine
     }
 }

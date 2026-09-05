@@ -6,13 +6,18 @@ struct HalfLineView: View {
     let side: GutterSide
     let language: String?
     let intraline: [Range<Int>]
-    var fontSize: Int = 12
+    let metrics: DiffMetrics
     var codeWidth: CGFloat? = nil
     /// IntelliJ-style center gutter: the LEFT half puts its numbers on its
     /// trailing edge so both number columns meet at the divider.
     var numbersTrailing: Bool = false
     var onGutterTap: (() -> Void)? = nil
     @EnvironmentObject var highlighter: HighlightService
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Diff washes need different alphas per scheme: the same alpha over white
+    /// and over near-black does not read at the same strength.
+    private var dark: Bool { colorScheme == .dark }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -40,17 +45,18 @@ struct HalfLineView: View {
 
     private var separator: some View {
         Rectangle()
-            .fill(Color.primary.opacity(0.07))
-            .frame(width: 1)
+            .fill(Palette.hairline)
+            .frame(width: metrics.separatorWidth)
     }
 
     // Long lines wrap within the half's width instead of truncating
     // or requiring a horizontal pan.
     private var code: some View {
+        // The font rides on the AttributedString itself — Highlightr stamps
+        // it there, and that beats any .font modifier applied here.
         Text(attributed)
-            .font(.system(size: CGFloat(fontSize), design: .monospaced))
-            .padding(.leading, 6)
-            .padding(.vertical, 2)
+            .padding(.leading, metrics.codeInset)
+            .padding(.vertical, metrics.rowPadding)
             .frame(width: codeWidth, alignment: .topLeading)
             .frame(maxWidth: codeWidth == nil ? .infinity : nil, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -58,7 +64,7 @@ struct HalfLineView: View {
     /// Side-by-side halves show one number column; unified shows BOTH old and
     /// new columns (a single interleaved column reads as broken numbering).
     @ViewBuilder private var gutter: some View {
-        let numberFont = Font.system(size: CGFloat(fontSize) - 1, design: .monospaced)
+        let numberFont = Font.system(size: metrics.numberFontSize, design: .monospaced)
         if side == .unified {
             // One pre-formatted text: old and new numbers as fixed-width
             // fields, so both columns always align without nested layout.
@@ -66,17 +72,19 @@ struct HalfLineView: View {
             Text(text)
                 .font(numberFont)
                 .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .trailing)
-                .padding(.trailing, 8)
-                .padding(.top, 2)
+                .lineLimit(1)
+                .frame(width: metrics.gutterWidth, alignment: .trailing)
+                .padding(.trailing, metrics.gutterTrailing)
+                .padding(.top, metrics.rowPadding)
                 .frame(maxHeight: .infinity, alignment: .topTrailing)
         } else {
             Text(line.flatMap { $0.gutterNumber(for: side) }.map(String.init) ?? "")
                 .font(numberFont)
                 .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
-                .padding(.trailing, 8)
-                .padding(.top, 2)
+                .lineLimit(1)
+                .frame(width: metrics.gutterWidth, alignment: .trailing)
+                .padding(.trailing, metrics.gutterTrailing)
+                .padding(.top, metrics.rowPadding)
                 .frame(maxHeight: .infinity, alignment: .topTrailing)
         }
     }
@@ -101,10 +109,13 @@ struct HalfLineView: View {
             if let lo = attr.index(attr.startIndex, offsetByCharacters: range.lowerBound) as AttributedString.Index?,
                let hi = attr.index(attr.startIndex, offsetByCharacters: range.upperBound) as AttributedString.Index? {
                 attr[lo..<hi].backgroundColor = line.kind == .addition
-                    ? Color.green.opacity(0.32) : Color.red.opacity(0.32)
-                // Dim syntax colors (comments especially) disappear against
-                // the emphasis wash — emphasized spans read at full contrast.
+                    ? Palette.diffAddEmphasis(dark) : Palette.diffRemoveEmphasis(dark)
+                // Dim syntax colours — comments especially — vanish against
+                // the emphasis wash, so emphasised spans read at full
+                // contrast. Dropping this in favour of weight alone made
+                // commented-out code unreadable where it was emphasised.
                 attr[lo..<hi].foregroundColor = Color.primary
+                attr[lo..<hi].font = highlighter.emphasisFont
             }
         }
         return attr
@@ -112,19 +123,19 @@ struct HalfLineView: View {
 
     private var background: Color {
         switch line?.kind {
-        case .addition: Color.green.opacity(0.10)
-        case .deletion: Color.red.opacity(0.10)
+        case .addition: Palette.diffAddFill(dark)
+        case .deletion: Palette.diffRemoveFill(dark)
         case .context: Color.clear
-        case nil: Color.primary.opacity(0.035)  // filler: deliberately dimmed, not a hole
+        case nil: Palette.diffFiller(dark)  // filler: deliberately dimmed, not a hole
         }
     }
 
     private var gutterBackground: Color {
         switch line?.kind {
-        case .addition: Color.green.opacity(0.14)
-        case .deletion: Color.red.opacity(0.14)
-        case .context: Color.primary.opacity(0.03)
-        case nil: Color.primary.opacity(0.05)
+        case .addition: Palette.diffAddGutter(dark)
+        case .deletion: Palette.diffRemoveGutter(dark)
+        case .context: Palette.diffContextGutter(dark)
+        case nil: Palette.diffFiller(dark)
         }
     }
 }
@@ -134,7 +145,7 @@ struct DiffRowView: View {
     let layout: DiffLayout
     let language: String?
     let isSelected: Bool
-    var fontSize: Int = 12
+    let metrics: DiffMetrics
     var leftCodeWidth: CGFloat? = nil
     var rightCodeWidth: CGFloat? = nil
     let onGutterClick: (Int, Bool) -> Void  // (rowID, shiftHeld)
@@ -148,13 +159,13 @@ struct DiffRowView: View {
             case .sideBySide:
                 HStack(alignment: .top, spacing: 0) {
                     HalfLineView(line: row.left, side: .left, language: language, intraline: ranges.old,
-                                 fontSize: fontSize, codeWidth: leftCodeWidth,
+                                 metrics: metrics, codeWidth: leftCodeWidth,
                                  numbersTrailing: true, onGutterTap: select)
                     Rectangle()
-                        .fill(Color.primary.opacity(0.12))
-                        .frame(width: 1)
+                        .fill(Palette.hairline)
+                        .frame(width: metrics.dividerWidth)
                     HalfLineView(line: row.right, side: .right, language: language, intraline: ranges.new,
-                                 fontSize: fontSize, codeWidth: rightCodeWidth, onGutterTap: select)
+                                 metrics: metrics, codeWidth: rightCodeWidth, onGutterTap: select)
                 }
                 .fixedSize(horizontal: false, vertical: true)
             case .unified:
@@ -162,7 +173,7 @@ struct DiffRowView: View {
                              side: .unified,
                              language: language,
                              intraline: row.left?.kind == .deletion ? ranges.old : ranges.new,
-                             fontSize: fontSize, onGutterTap: select)
+                             metrics: metrics, onGutterTap: select)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -170,10 +181,12 @@ struct DiffRowView: View {
         // easy to miss. Shift-click extends, like any list.
         .contentShape(Rectangle())
         .onTapGesture { select() }
-        .background(isSelected ? Color.accentColor.opacity(0.22) : .clear)
+        .overlay {
+            if isSelected { Palette.selection }
+        }
         .overlay(alignment: .leading) {
             if isSelected {
-                Rectangle().fill(Color.accentColor).frame(width: 2)
+                Rectangle().fill(Palette.selectionBar).frame(width: 2)
             }
         }
         .contextMenu {
@@ -195,25 +208,24 @@ struct DiffRowView: View {
     }
 
     private var intralineRanges: (old: [Range<Int>], new: [Range<Int>]) {
-        guard let l = row.left, let r = row.right, l.kind == .deletion, r.kind == .addition else {
-            return ([], [])
-        }
-        return IntralineDiff.changedRanges(old: l.text, new: r.text)
+        guard let pair = row.emphasisPair else { return ([], []) }
+        return IntralineCache.shared.ranges(old: pair.old, new: pair.new)
     }
 }
 
 struct HunkHeaderView: View {
     let text: String
-    var fontSize: Int = 12
+    let metrics: DiffMetrics
 
     var body: some View {
         Text(text)
-            .font(.system(size: CGFloat(fontSize) - 1, design: .monospaced))
+            .font(.system(size: metrics.numberFontSize, design: .monospaced))
             .foregroundStyle(.secondary)
             .lineLimit(1)
-            .padding(.leading, 12)
-            .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-            .background(Color.primary.opacity(0.05))
+            .padding(.leading, Spacing.md)
+            // Grows with the type rather than clipping it at the largest sizes.
+            .frame(maxWidth: .infinity, minHeight: metrics.fontSize * 1.7, alignment: .leading)
+            .background(Palette.surface)
     }
 }
 

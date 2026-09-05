@@ -37,6 +37,10 @@ public struct FileDiffView: View {
         var items: [DiffItem] = []
         var allRows: [SideBySideRow] = []
         var changeBlocks: [ChangeBlock] = []
+        /// Widest line number in the file, in digits. Computed here because
+        /// finding it walks every line: as a computed property read once per
+        /// visible row it cost ~34ms per body pass on a 10k-line file.
+        var digits = 2
         var key = ""
     }
     /// Heavy row/anchor/rail construction, cached per (file, layout,
@@ -47,14 +51,20 @@ public struct FileDiffView: View {
     // Drag-to-select over rows: visible rows report their frames in the
     // "diffSpace" coordinate space; a container-level drag maps y positions
     // back to row ids.
-    @State private var rowFrames: [Int: CGRect] = [:]
+    /// Row frames live in a reference box rather than `@State` on purpose.
+    ///
+    /// Scrolling changes every visible row's frame in `diffSpace`, so the
+    /// preference fires on essentially every scroll frame. Storing that in
+    /// `@State` re-rendered this whole view each time — and the frames are
+    /// only ever read inside the drag gesture, where a re-render buys nothing.
+    @State private var rowFrames = RowFrameStore()
     @State private var dragAnchorRow: Int?
 
     public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
     public var onResolveComment: (ReviewComment) -> Void = { _ in }
 
     public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
-                fontSize: Int = 12, focusLine: Int? = nil, comments: [ReviewComment] = [],
+                fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil, comments: [ReviewComment] = [],
                 onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
                 onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
                 onResolveComment: @escaping (ReviewComment) -> Void = { _ in }) {
@@ -120,10 +130,25 @@ public struct FileDiffView: View {
                                       extent: CGFloat(i - start) / total,
                                       color: color))
         }
-        return Built(items: items, allRows: rows, changeBlocks: blocks, key: key)
+        return Built(items: items, allRows: rows, changeBlocks: blocks,
+                     digits: DiffMetrics.digits(for: file.maxLineNumber), key: key)
     }
 
-    private var buildKey: String { "\(file.path)|\(layout)|\(comments.count)" }
+    /// Keyed on comment identity and state, not just count: resolving a
+    /// comment changes `resolved` without changing the count, and the stale
+    /// card used to stay on screen.
+    private var buildKey: String {
+        let commentKey = comments.map { "\($0.id):\($0.resolved)" }.joined(separator: ",")
+        return "\(file.path)|\(layout)|\(commentKey)"
+    }
+
+    /// Diff geometry for this file: the gutter is sized from the widest line
+    /// number it actually has to show, at the current font size.
+    private var metrics: DiffMetrics {
+        DiffMetrics(fontSize: CGFloat(fontSize),
+                    digits: built.digits,
+                    unified: layout == .unified)
+    }
 
     public var body: some View {
         switch file.kind {
@@ -137,20 +162,21 @@ public struct FileDiffView: View {
                 let rightW = widths.right
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
+                        let language = HighlightService.language(forPath: file.path)
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(built.items) { item in
                                 switch item {
                                 case .hunkHeader(_, let text):
-                                    HunkHeaderView(text: text, fontSize: fontSize)
+                                    HunkHeaderView(text: text, metrics: metrics)
                                 case .comment(let c):
                                     CommentCardView(comment: c,
                                                     onReply: { body in onReplyComment(c, body) },
                                                     onResolve: { onResolveComment(c) })
                                 case .row(let row):
                                     DiffRowView(row: row, layout: layout,
-                                                language: HighlightService.language(forPath: file.path),
+                                                language: language,
                                                 isSelected: selection.map { $0.range.contains(row.id) } ?? false,
-                                                fontSize: fontSize,
+                                                metrics: metrics,
                                                 leftCodeWidth: leftW,
                                                 rightCodeWidth: rightW,
                                                 onGutterClick: { id, shift in
@@ -168,7 +194,7 @@ public struct FileDiffView: View {
                             }
                         }
                         .frame(width: geo.size.width, alignment: .leading)
-                        .onPreferenceChange(RowFramesKey.self) { rowFrames = $0 }
+                        .onPreferenceChange(RowFramesKey.self) { frames in rowFrames.frames = frames }
                     }
                     .coordinateSpace(name: "diffSpace")
                     // Mouse drag over rows extends the selection line by line
@@ -214,7 +240,7 @@ public struct FileDiffView: View {
                         // Anchored to the REAL divider x (left gutter + left column),
                         // which differs from paneWidth*split when widths clamp.
                         SplitHandle(split: $split, paneWidth: geo.size.width,
-                                    dividerX: leftW + 53 + 0.5)
+                                    dividerX: leftW + metrics.totalGutter + 0.5)
                     }
                 }
             }
@@ -261,9 +287,13 @@ public struct FileDiffView: View {
 
     private func columnWidths(paneWidth: CGFloat) -> (left: CGFloat?, right: CGFloat?) {
         guard layout == .sideBySide else { return (nil, nil) }
-        let gutter: CGFloat = 44 + 8 + 1
-        let left = max(80, paneWidth * CGFloat(split) - gutter)
-        let right = max(80, paneWidth * CGFloat(1 - split) - gutter - 1)
+        let gutter = metrics.totalGutter
+        // The rail is an overlay on the trailing edge; without reserving it
+        // here it covered the last 12pt of the right column, tap target
+        // included.
+        let usable = paneWidth - DiffMetrics.railWidth
+        let left = max(80, usable * CGFloat(split) - gutter)
+        let right = max(80, usable * CGFloat(1 - split) - gutter - metrics.dividerWidth)
         return (left, right)
     }
 
@@ -277,10 +307,10 @@ public struct FileDiffView: View {
 
     /// Row under a y position in "diffSpace", nearest match when between rows.
     private func rowID(atY y: CGFloat) -> Int? {
-        if let hit = rowFrames.first(where: { $0.value.minY <= y && y < $0.value.maxY }) {
+        if let hit = rowFrames.frames.first(where: { $0.value.minY <= y && y < $0.value.maxY }) {
             return hit.key
         }
-        return rowFrames.min(by: { abs($0.value.midY - y) < abs($1.value.midY - y) })?.key
+        return rowFrames.frames.min(by: { abs($0.value.midY - y) < abs($1.value.midY - y) })?.key
     }
 
     /// Scroll to and select the row matching `focusLine` (new-file number
@@ -330,11 +360,10 @@ public struct MarkdownBodyView: View {
                 case .code(let c):
                     ScrollView(.horizontal) {
                         Text(highlighter.highlightedAuto(c))
-                            .font(.system(size: 11.5, design: .monospaced))
                             .textSelection(.enabled)
                             .padding(8)
                     }
-                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -443,7 +472,7 @@ public struct CommentCardView: View {
         .background(.quaternary.opacity(comment.resolved ? 0.3 : 0.6), in: RoundedRectangle(cornerRadius: 8))
         .overlay(alignment: .leading) {
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.primary.opacity(0.1))
+                .strokeBorder(Palette.cardBorder)
         }
         .opacity(comment.resolved ? 0.75 : 1)
         .padding(.vertical, 4)
@@ -488,10 +517,10 @@ struct ChangeRailView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Color.primary.opacity(0.04)
+                Palette.surface
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(block.color.opacity(0.85))
+                        .fill(block.color.opacity(0.9))
                         .frame(width: 7, height: max(3, block.extent * geo.size.height))
                         .offset(x: 2.5, y: block.fraction * geo.size.height)
                 }
@@ -509,6 +538,11 @@ struct ChangeRailView: View {
         .frame(width: 12)
         .accessibilityLabel("Change overview")
     }
+}
+
+/// Holds row frames without publishing changes. See `rowFrames`.
+private final class RowFrameStore: @unchecked Sendable {
+    var frames: [Int: CGRect] = [:]
 }
 
 private struct RowFramesKey: PreferenceKey {

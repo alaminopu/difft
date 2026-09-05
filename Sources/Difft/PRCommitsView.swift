@@ -63,7 +63,7 @@ struct PRCommitsView: View {
             OverviewBackButton()
             Divider().frame(height: 14)
             Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
-            Text("Commits").font(.headline)
+            Text("Commits").font(Typography.sectionTitle)
             Text(verbatim: "\(model.commits.count)")
                 .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             HStack(spacing: 4) {
@@ -127,13 +127,13 @@ struct PRCommitsView: View {
                         .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
                         .overlay {
                             RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.primary.opacity(0.08))
+                                .strokeBorder(Palette.cardBorder)
                         }
                     } header: {
                         HStack(spacing: 6) {
                             Image(systemName: "calendar").imageScale(.small)
                                 .foregroundStyle(.secondary)
-                            Text(group.day).font(.callout.bold())
+                            Text(group.day).font(Typography.groupHeader)
                             Text(verbatim: "\(group.commits.count)")
                                 .font(.caption.monospacedDigit())
                                 .padding(.horizontal, 5).padding(.vertical, 1)

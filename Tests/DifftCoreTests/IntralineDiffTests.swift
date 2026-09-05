@@ -13,9 +13,14 @@ final class IntralineDiffTests: XCTestCase {
         XCTAssertTrue(r.old.isEmpty); XCTAssertTrue(r.new.isEmpty)
     }
 
-    func testCompletelyDifferent() {
+    /// Two lines with nothing in common get no emphasis: the row tint already
+    /// says "this changed", and marking every character of both is what made
+    /// rewritten blocks unreadable. Previously this returned the full range of
+    /// each side. See IntralineSimilarityTests for the reasoning and measured
+    /// thresholds.
+    func testCompletelyDifferentIsNotEmphasised() {
         let r = IntralineDiff.changedRanges(old: "abc", new: "xyz")
-        XCTAssertEqual(r.old, [0..<3]); XCTAssertEqual(r.new, [0..<3])
+        XCTAssertTrue(r.old.isEmpty); XCTAssertTrue(r.new.isEmpty)
     }
 
     func testInsertionMergesAdjacent() {

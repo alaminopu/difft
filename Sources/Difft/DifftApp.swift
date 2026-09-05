@@ -28,7 +28,7 @@ enum AppAppearance: String, CaseIterable, Identifiable {
 struct DifftApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var highlighter = HighlightService()
-    @AppStorage("appearance") private var appearance = AppAppearance.system
+    @AppStorage(PrefKey.appearance) private var appearance = AppAppearance.system
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular) // needed when run via `swift run`
@@ -44,6 +44,10 @@ struct DifftApp: App {
                 .preferredColorScheme(appearance.colorScheme)
         }
         .commands { DifftCommands(model: model) }
+
+        Settings {
+            SettingsView()
+        }
     }
 }
 
@@ -52,16 +56,9 @@ struct DifftApp: App {
 /// nobody can find is a feature nobody uses.
 struct DifftCommands: Commands {
     @ObservedObject var model: AppModel
-    @AppStorage("appearance") private var appearance = AppAppearance.system
 
     var body: some Commands {
         CommandGroup(after: .sidebar) {
-            Divider()
-
-            Picker("Appearance", selection: $appearance) {
-                ForEach(AppAppearance.allCases) { Text($0.label).tag($0) }
-            }
-
             Divider()
             Button("All Review Comments") {
                 model.session?.showCommits = false
@@ -99,7 +96,10 @@ struct RootView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var highlighter: HighlightService
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("appearance") private var appearance = AppAppearance.system
+    @AppStorage(PrefKey.appearance) private var appearance = AppAppearance.system
+    @AppStorage(PrefKey.codeFontFamily) private var codeFontFamily = CodeFont.systemFamily
+    @AppStorage(PrefKey.diffFontSize) private var diffFontSize = DiffMetrics.defaultFontSize
+    @AppStorage(PrefKey.syntaxTheme) private var syntaxTheme = SyntaxTheme.atomOne
 
     /// Resolved from the preference rather than read from the environment, so
     /// the syntax palette cannot lag a scheme the user forced.
@@ -121,8 +121,24 @@ struct RootView: View {
         }
         // Keep the syntax palette in lockstep with the real appearance —
         // NSApp.effectiveAppearance lies during early launch.
-        .onAppear { highlighter.setDark(isDark) }
+        .onAppear { syncHighlighter() }
         .onChange(of: colorScheme) { _, _ in highlighter.setDark(isDark) }
         .onChange(of: appearance) { _, _ in highlighter.setDark(isDark) }
+        // The font has to be pushed into the highlighter, not applied around
+        // it: Highlightr stamps its own font onto every span, and that beats
+        // the view's .font modifier.
+        .onChange(of: codeFontFamily) { _, _ in syncCodeFont() }
+        .onChange(of: diffFontSize) { _, _ in syncCodeFont() }
+        .onChange(of: syntaxTheme) { _, theme in highlighter.setTheme(theme) }
+    }
+
+    private func syncHighlighter() {
+        highlighter.setTheme(syntaxTheme)
+        highlighter.setDark(isDark)
+        syncCodeFont()
+    }
+
+    private func syncCodeFont() {
+        highlighter.setCodeFont(family: codeFontFamily, size: CGFloat(diffFontSize))
     }
 }

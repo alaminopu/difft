@@ -78,7 +78,7 @@ struct ChatTab: View {
                         }
                         MarkdownBodyView(text: msg.text)
                             .padding(8)
-                            .background(msg.role == "user" ? Color.accentColor.opacity(0.15) : Color.gray.opacity(0.1),
+                            .background(msg.role == "user" ? Palette.activeChip : Palette.surface,
                                         in: RoundedRectangle(cornerRadius: 8))
                     }
                     .frame(maxWidth: .infinity, alignment: msg.role == "user" ? .trailing : .leading)
@@ -127,8 +127,8 @@ struct FindingsTab: View {
                 .padding(.top, 8)
             List(Array(session.data.findings.enumerated()), id: \.offset) { _, f in
                 VStack(alignment: .leading, spacing: 4) {
-                    let sevColor: Color = f.severity == "high" ? .red
-                        : f.severity == "medium" ? .orange : .gray
+                    let sevColor: Color = f.severity == "high" ? Palette.removed
+                        : f.severity == "medium" ? Palette.warning : Color.secondary
                     let fileName = String(f.file.split(separator: "/").last ?? "")
                     let dir = f.file.split(separator: "/").dropLast().joined(separator: "/")
                     HStack(spacing: 6) {
