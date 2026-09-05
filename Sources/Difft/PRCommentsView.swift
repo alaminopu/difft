@@ -199,6 +199,7 @@ struct PRCommentsView: View {
 /// One conversation: where it is anchored, the diff it refers to, and the
 /// comments themselves.
 struct CommentThreadCard: View {
+    @EnvironmentObject var model: AppModel
     let thread: CommentThread
     var onOpen: () -> Void
 
@@ -244,7 +245,14 @@ struct CommentThreadCard: View {
             }
 
             ForEach(thread.comments) { comment in
-                CommentCardView(comment: comment, indented: false)
+                CommentCardView(
+                    comment: comment,
+                    onReply: { body in Task { await model.reply(to: comment, body: body) } },
+                    onResolve: { Task { await model.resolve(comment) } },
+                    onEdit: model.canEdit(comment)
+                        ? { body in Task { await model.edit(comment, body: body) } }
+                        : nil,
+                    indented: false)
             }
         }
         .padding(12)

@@ -230,6 +230,57 @@ public final class GitHubService: Sendable {
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
     }
 
+    /// The signed-in login, so the UI can tell which comments are the user's
+    /// own and therefore editable.
+    public func currentUser(repoDir: URL) async throws -> String {
+        let r = try await runner.run("gh", arguments: ["api", "user", "--jq", ".login"],
+                                     currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func updateComment(repoDir: URL, commentID: Int, body: String) async throws {
+        let r = try await runner.run("gh", arguments: [
+            "api", "-X", "PATCH",
+            "repos/{owner}/{repo}/pulls/comments/\(commentID)",
+            "-f", "body=\(body)",
+        ], currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+    }
+
+    public func deleteComment(repoDir: URL, commentID: Int) async throws {
+        let r = try await runner.run("gh", arguments: [
+            "api", "-X", "DELETE", "repos/{owner}/{repo}/pulls/comments/\(commentID)",
+        ], currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+    }
+
+    /// Starts a new review thread on a line, or on a range when `startLine`
+    /// is given.
+    ///
+    /// `commitID` must be the PR head the lines were read from; GitHub
+    /// rejects a comment anchored to a commit the line numbers do not match.
+    public func createComment(repoDir: URL, number: Int, commitID: String,
+                              path: String, line: Int, startLine: Int?,
+                              side: String = "RIGHT", body: String) async throws {
+        var args = [
+            "api", "-X", "POST",
+            "repos/{owner}/{repo}/pulls/\(number)/comments",
+            "-f", "body=\(body)",
+            "-f", "commit_id=\(commitID)",
+            "-f", "path=\(path)",
+            "-F", "line=\(line)",
+            "-f", "side=\(side)",
+        ]
+        // GitHub rejects start_line when it equals line, so a single-line
+        // selection must be sent as a plain line comment.
+        if let startLine, startLine < line {
+            args += ["-F", "start_line=\(startLine)", "-f", "start_side=\(side)"]
+        }
+        let r = try await runner.run("gh", arguments: args, currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+    }
+
     public func resolveThread(repoDir: URL, threadID: String) async throws {
         let mutation = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}"
         let r = try await runner.run("gh", arguments: [

@@ -201,7 +201,18 @@ struct FileDiffContainer: View {
                          onFocused: { session.selectedLines = nil },
                          onAsk: onAsk,
                          onReplyComment: { c, body in Task { await model.reply(to: c, body: body) } },
-                         onResolveComment: { c in Task { await model.resolve(c) } })
+                         onResolveComment: { c in Task { await model.resolve(c) } },
+                         onEditComment: { c in
+                             // No handler means no Edit button, which is how
+                             // someone else's comment shows no action that
+                             // would only fail.
+                             guard model.canEdit(c) else { return nil }
+                             return { body in Task { await model.edit(c, body: body) } }
+                         },
+                         onAddComment: { start, end, body in
+                             Task { await model.addComment(path: file.path, startLine: start,
+                                                           endLine: end, body: body) }
+                         })
             }
                 .id(file.path) // reset scroll + selection per file
                 .onChange(of: file.path) { selection = nil }

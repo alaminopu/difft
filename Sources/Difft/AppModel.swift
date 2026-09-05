@@ -24,6 +24,9 @@ final class AppModel: ObservableObject {
     /// Comments and commits arrive after the diff; the overview shows their
     /// counts, so it needs to know they are still on the way.
     @Published var isLoadingDetails = false
+    /// Signed-in login, so a comment card knows whether it is the user's own
+    /// and can offer editing. nil until the first lookup succeeds.
+    @Published private(set) var currentUserLogin: String?
     /// Files changed by the single commit currently drilled into, kept apart
     /// from `files` so opening a commit never disturbs the PR-wide diff.
     @Published var commitFiles: [FileDiff] = []
@@ -76,6 +79,9 @@ final class AppModel: ObservableObject {
 
     func loadPRs() async {
         guard let repoDir else { return }
+        // Also the point a repo becomes known, which is what the login
+        // lookup needs; at launch there may not be one yet.
+        Task { await loadCurrentUser() }
         do { prs = try await github.listPRs(repoDir: repoDir); errorBanner = nil }
         catch { errorBanner = "Failed to list PRs: \(error.localizedDescription)" }
     }
@@ -255,6 +261,66 @@ final class AppModel: ObservableObject {
             }
         }
         return loaded
+    }
+
+    /// Looked up once per launch; the signed-in account does not change
+    /// under us, and it costs its own `gh` process.
+    func loadCurrentUser() async {
+        guard currentUserLogin == nil, let repoDir else { return }
+        currentUserLogin = try? await github.currentUser(repoDir: repoDir)
+    }
+
+    func canEdit(_ comment: ReviewComment) -> Bool {
+        guard let me = currentUserLogin else { return false }
+        return comment.author == me
+    }
+
+    func edit(_ comment: ReviewComment, body: String) async {
+        guard let repoDir, let session else { return }
+        do {
+            try await github.updateComment(repoDir: repoDir, commentID: comment.id, body: body)
+            comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
+            errorBanner = nil
+        } catch {
+            errorBanner = "Failed to edit comment: \(error.localizedDescription)"
+        }
+    }
+
+    func delete(_ comment: ReviewComment) async {
+        guard let repoDir, let session else { return }
+        do {
+            try await github.deleteComment(repoDir: repoDir, commentID: comment.id)
+            comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
+            errorBanner = nil
+        } catch {
+            errorBanner = "Failed to delete comment: \(error.localizedDescription)"
+        }
+    }
+
+    /// Starts a review thread on the selected lines of a file.
+    ///
+    /// GitHub anchors a comment to a commit, and rejects one whose line
+    /// numbers do not belong to that commit's diff — so this uses the head
+    /// the worktree is actually checked out at, which is what the line
+    /// numbers on screen were read from.
+    func addComment(path: String, startLine: Int, endLine: Int, body: String) async {
+        guard let repoDir, let session else { return }
+        guard let head = currentHead, !head.isEmpty else {
+            errorBanner = "Cannot comment yet: still resolving the PR's head commit."
+            return
+        }
+        do {
+            try await github.createComment(
+                repoDir: repoDir, number: session.data.pr.number, commitID: head,
+                path: path, line: endLine,
+                startLine: startLine < endLine ? startLine : nil, body: body)
+            comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
+            errorBanner = nil
+        } catch {
+            // The usual cause is commenting on a line outside the diff, which
+            // GitHub refuses; say so rather than showing a bare API error.
+            errorBanner = "Failed to add comment: \(error.localizedDescription)"
+        }
     }
 
     func reply(to comment: ReviewComment, body: String) async {

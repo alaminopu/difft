@@ -151,6 +151,7 @@ struct DiffRowView: View {
     let onGutterClick: (Int, Bool) -> Void  // (rowID, shiftHeld)
     var onContextAsk: ((Int) -> Void)? = nil
     var onContextCopy: ((Int) -> Void)? = nil
+    var onContextComment: ((Int) -> Void)? = nil
 
     var body: some View {
         let ranges = intralineRanges
@@ -190,6 +191,14 @@ struct DiffRowView: View {
             }
         }
         .contextMenu {
+            if onContextComment != nil {
+                Button {
+                    onContextComment?(row.id)
+                } label: {
+                    Label("Comment on selection", systemImage: "bubble.left.and.text.bubble.right")
+                }
+                Divider()
+            }
             Button {
                 onContextAsk?(row.id)
             } label: {

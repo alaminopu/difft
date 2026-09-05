@@ -59,17 +59,30 @@ public struct FileDiffView: View {
     /// only ever read inside the drag gesture, where a re-render buys nothing.
     @State private var rowFrames = RowFrameStore()
     @State private var dragAnchorRow: Int?
+    /// Line range a new comment is being written against, nil when not
+    /// composing.
+    @State private var composing: CommentTarget?
 
     public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
     public var onResolveComment: (ReviewComment) -> Void = { _ in }
+    /// nil for a comment that is not the signed-in user's.
+    public var onEditComment: ((ReviewComment) -> ((String) -> Void)?)?
+    /// (path, startLine, endLine, body). nil disables commenting entirely,
+    /// which is what a single-commit diff wants — its line numbers are not
+    /// the ones GitHub anchors PR comments to.
+    public var onAddComment: ((Int, Int, String) -> Void)?
 
     public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
                 fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil, comments: [ReviewComment] = [],
                 onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
                 onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
-                onResolveComment: @escaping (ReviewComment) -> Void = { _ in }) {
+                onResolveComment: @escaping (ReviewComment) -> Void = { _ in },
+                onEditComment: ((ReviewComment) -> ((String) -> Void)?)? = nil,
+                onAddComment: ((Int, Int, String) -> Void)? = nil) {
         self.onReplyComment = onReplyComment
         self.onResolveComment = onResolveComment
+        self.onEditComment = onEditComment
+        self.onAddComment = onAddComment
         self.file = file; self._layout = layout; self._selection = selection
         self.fontSize = fontSize; self.focusLine = focusLine
         self.onFocused = onFocused; self.onAsk = onAsk
@@ -171,7 +184,8 @@ public struct FileDiffView: View {
                                 case .comment(let c):
                                     CommentCardView(comment: c,
                                                     onReply: { body in onReplyComment(c, body) },
-                                                    onResolve: { onResolveComment(c) })
+                                                    onResolve: { onResolveComment(c) },
+                                                    onEdit: onEditComment?(c))
                                 case .row(let row):
                                     DiffRowView(row: row, layout: layout,
                                                 language: language,
@@ -183,7 +197,9 @@ public struct FileDiffView: View {
                                                     selection = SelectionLogic.click(current: selection, rowID: id, extending: shift)
                                                 },
                                                 onContextAsk: { id in askAbout(rowID: id) },
-                                                onContextCopy: { id in copyRows(rowID: id) })
+                                                onContextCopy: { id in copyRows(rowID: id) },
+                                                onContextComment: onAddComment == nil
+                                                    ? nil : { id in startComment(rowID: id) })
                                         .id(item.id)
                                         .background(GeometryReader { rowGeo in
                                             Color.clear.preference(
@@ -245,6 +261,14 @@ public struct FileDiffView: View {
                 }
             }
             .copyable(selection.map { [SelectionLogic.selectedText(rows: built.allRows, selection: $0)] } ?? [])
+            .sheet(item: $composing) { target in
+                NewCommentSheet(path: file.path, target: target) { body in
+                    onAddComment?(target.startLine, target.endLine, body)
+                    composing = nil
+                } onCancel: {
+                    composing = nil
+                }
+            }
             .task(id: buildKey) {
                 // Off the main actor: a big file builds in background and pops
                 // in; body evaluations stay cheap in the meantime.
@@ -270,6 +294,20 @@ public struct FileDiffView: View {
         let sel = LineSelection(anchor: rowID, head: rowID)
         selection = sel
         return sel
+    }
+
+    /// Opens the composer for the selected rows.
+    ///
+    /// GitHub anchors a review comment to a line of the *new* file, so rows
+    /// that only exist on the old side (pure deletions) cannot carry one —
+    /// the selection is narrowed to the lines that can.
+    private func startComment(rowID: Int) {
+        let sel = effectiveSelection(for: rowID)
+        let newLines = built.allRows
+            .filter { sel.range.contains($0.id) }
+            .compactMap { $0.right?.newNumber }
+        guard let low = newLines.min(), let high = newLines.max() else { return }
+        composing = CommentTarget(startLine: low, endLine: high)
     }
 
     private func askAbout(rowID: Int) {
@@ -332,6 +370,7 @@ public struct FileDiffView: View {
 public struct MarkdownBodyView: View {
     public let text: String
     @EnvironmentObject var highlighter: HighlightService
+    @AppStorage(PrefKey.codeFontFamily) private var codeFontFamily = CodeFont.systemFamily
 
     public init(text: String) { self.text = text }
 
@@ -350,9 +389,8 @@ public struct MarkdownBodyView: View {
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            Text((try? AttributedString(markdown: chunk.text,
-                                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(chunk.text))
-                                .font(.callout)
+                            Text(Self.inline(chunk.text, codeFamily: codeFontFamily))
+                                .font(Typography.body)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -372,6 +410,30 @@ public struct MarkdownBodyView: View {
 }
 
 extension MarkdownBodyView {
+    /// Inline markdown with `backticked spans` actually rendered as code.
+    ///
+    /// `AttributedString(markdown:)` recognises them and sets
+    /// `inlinePresentationIntent = .code`, but nothing acts on that intent, so
+    /// inline code came out looking exactly like the prose around it — which
+    /// matters in review comments, where half the sentence is identifiers.
+    static func inline(_ markdown: String, codeFamily: String) -> AttributedString {
+        guard var attr = try? AttributedString(
+            markdown: markdown,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        else { return AttributedString(markdown) }
+
+        // Collect first: mutating the string while iterating its runs would
+        // invalidate the indices being walked.
+        let codeRanges = attr.runs.compactMap {
+            $0.inlinePresentationIntent?.contains(.code) == true ? $0.range : nil
+        }
+        for range in codeRanges {
+            attr[range].font = CodeFont.swiftUIFont(family: codeFamily, size: 12)
+            attr[range].backgroundColor = Palette.inlineCode
+        }
+        return attr
+    }
+
     struct Chunk { let text: String; let isHeading: Bool }
     /// Splits prose into heading lines (#, ##, ###…) and paragraph runs.
     static func headingChunks(_ text: String) -> [Chunk] {
@@ -406,17 +468,24 @@ public struct CommentCardView: View {
     let comment: ReviewComment
     var onReply: (String) -> Void = { _ in }
     var onResolve: () -> Void = {}
+    /// nil when the comment is not the signed-in user's, which is what hides
+    /// the Edit action rather than showing one that would fail.
+    var onEdit: ((String) -> Void)?
     var indented: Bool = true
     @State private var replying = false
     @State private var replyText = ""
+    @State private var editing = false
+    @State private var editText = ""
 
     public init(comment: ReviewComment,
                 onReply: @escaping (String) -> Void = { _ in },
                 onResolve: @escaping () -> Void = {},
+                onEdit: ((String) -> Void)? = nil,
                 indented: Bool = true) {
         self.comment = comment
         self.onReply = onReply
         self.onResolve = onResolve
+        self.onEdit = onEdit
         self.indented = indented
     }
 
@@ -443,7 +512,28 @@ public struct CommentCardView: View {
                 }
             }
 
-            MarkdownBodyView(text: comment.body)
+            if editing {
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    TextEditor(text: $editText)
+                        .font(Typography.body)
+                        .frame(minHeight: 68)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: Radius.sm)
+                                .strokeBorder(Palette.cardBorder)
+                        }
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { editing = false }
+                        Button("Save") { submitEdit() }
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                      || editText == comment.body)
+                    }
+                    .font(Typography.meta)
+                }
+            } else {
+                MarkdownBodyView(text: comment.body)
+            }
 
             HStack(spacing: 12) {
                 Button(replying ? "Cancel" : "Reply") {
@@ -452,6 +542,15 @@ public struct CommentCardView: View {
                 }
                 .buttonStyle(.link)
                 .font(.caption)
+                if onEdit != nil, !editing {
+                    Button("Edit") {
+                        editText = comment.body
+                        editing = true
+                        replying = false
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                }
                 if comment.inReplyToID == nil, comment.threadID != nil, !comment.resolved {
                     Button("Resolve") { onResolve() }
                         .buttonStyle(.link)
@@ -480,6 +579,13 @@ public struct CommentCardView: View {
                                     : (comment.inReplyToID == nil ? 0 : 22))
         .padding(.trailing, indented ? 16 : 0)
         .frame(maxWidth: indented ? 760 : .infinity, alignment: .leading)
+    }
+
+    private func submitEdit() {
+        let text = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        onEdit?(text)
+        editing = false
     }
 
     private func submitReply() {
@@ -594,5 +700,65 @@ private struct SplitHandle: View {
             }
         }
         .allowsHitTesting(true)
+    }
+}
+
+/// The lines a new comment will be attached to.
+struct CommentTarget: Identifiable, Equatable {
+    let startLine: Int
+    let endLine: Int
+    var id: String { "\(startLine)-\(endLine)" }
+}
+
+/// Composer for a new review thread on a line or range.
+struct NewCommentSheet: View {
+    let path: String
+    let target: CommentTarget
+    var onSend: (String) -> Void
+    var onCancel: () -> Void
+    @State private var body_ = ""
+
+    /// "file.py:42" or "file.py:42-50", so it is unambiguous where this lands.
+    private var targetLabel: String {
+        let name = String(path.split(separator: "/").last ?? "")
+        return target.startLine == target.endLine
+            ? "\(name):\(target.startLine)"
+            : "\(name):\(target.startLine)-\(target.endLine)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .foregroundStyle(.secondary)
+                Text("New comment").font(Typography.sectionTitle)
+                Text(targetLabel)
+                    .font(Typography.path)
+                    .padding(.horizontal, Spacing.xs).padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+                Spacer()
+            }
+            TextEditor(text: $body_)
+                .font(Typography.body)
+                .frame(minHeight: 120)
+                .overlay {
+                    RoundedRectangle(cornerRadius: Radius.sm).strokeBorder(Palette.cardBorder)
+                }
+            HStack {
+                // The most common failure is picking a line GitHub does not
+                // consider part of the diff, so say where it will land.
+                Text("Posts to GitHub on the PR's head commit.")
+                    .font(Typography.meta).foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Comment") { onSend(body_.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(Spacing.lg)
+        .frame(width: 520)
     }
 }

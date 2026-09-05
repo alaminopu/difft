@@ -72,6 +72,9 @@ public enum Palette {
     public static let surfaceRaised = Color.primary.opacity(0.07)
     public static let hairline = Color.primary.opacity(0.08)
     public static let cardBorder = Color.primary.opacity(0.08)
+    /// Behind `inline code` in prose — enough to separate it, not enough to
+    /// break the line's rhythm.
+    public static let inlineCode = Color.primary.opacity(0.08)
 
     // States
     public static let selection = Color.accentColor.opacity(0.22)

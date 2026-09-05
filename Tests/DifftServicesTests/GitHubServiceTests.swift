@@ -166,3 +166,72 @@ final class GitHubServiceTests: XCTestCase {
     }
 
 }
+
+extension GitHubServiceTests {
+    func testUpdateCommentPatchesTheComment() async throws {
+        let fake = FakeProcessRunner()
+        let svc = GitHubService(runner: fake)
+        try await svc.updateComment(repoDir: URL(fileURLWithPath: "/tmp/r"), commentID: 99, body: "revised")
+        XCTAssertEqual(fake.calls[0].arguments, [
+            "api", "-X", "PATCH", "repos/{owner}/{repo}/pulls/comments/99", "-f", "body=revised",
+        ])
+    }
+
+    func testCreateCommentOnASingleLineOmitsStartLine() async throws {
+        let fake = FakeProcessRunner()
+        let svc = GitHubService(runner: fake)
+        try await svc.createComment(repoDir: URL(fileURLWithPath: "/tmp/r"), number: 7,
+                                    commitID: "abc123", path: "a/b.py",
+                                    line: 42, startLine: nil, body: "hi")
+        let args = fake.calls[0].arguments
+        XCTAssertTrue(args.contains("line=42"))
+        XCTAssertFalse(args.contains(where: { $0.hasPrefix("start_line=") }),
+                       "a single-line comment must not send start_line")
+    }
+
+    /// GitHub rejects start_line when it equals line, so a one-line selection
+    /// has to degrade to a plain line comment.
+    func testCreateCommentCollapsesAOneLineRange() async throws {
+        let fake = FakeProcessRunner()
+        let svc = GitHubService(runner: fake)
+        try await svc.createComment(repoDir: URL(fileURLWithPath: "/tmp/r"), number: 7,
+                                    commitID: "abc123", path: "a/b.py",
+                                    line: 42, startLine: 42, body: "hi")
+        XCTAssertFalse(fake.calls[0].arguments.contains(where: { $0.hasPrefix("start_line=") }))
+    }
+
+    func testCreateCommentOnARangeSendsBothBounds() async throws {
+        let fake = FakeProcessRunner()
+        let svc = GitHubService(runner: fake)
+        try await svc.createComment(repoDir: URL(fileURLWithPath: "/tmp/r"), number: 7,
+                                    commitID: "abc123", path: "a/b.py",
+                                    line: 50, startLine: 42, body: "hi")
+        let args = fake.calls[0].arguments
+        XCTAssertTrue(args.contains("line=50"))
+        XCTAssertTrue(args.contains("start_line=42"))
+        XCTAssertTrue(args.contains("side=RIGHT"))
+        XCTAssertTrue(args.contains("start_side=RIGHT"))
+    }
+
+    func testCreateCommentThrowsOnFailure() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "", stderr: "line must be part of the diff", exitCode: 1)]
+        let svc = GitHubService(runner: fake)
+        do {
+            try await svc.createComment(repoDir: URL(fileURLWithPath: "/tmp/r"), number: 7,
+                                        commitID: "abc", path: "a.py", line: 1, startLine: nil, body: "x")
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? GitHubServiceError, .commandFailed("line must be part of the diff"))
+        }
+    }
+
+    func testCurrentUserReadsTheLogin() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "alamin-br\n", stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let login = try await svc.currentUser(repoDir: URL(fileURLWithPath: "/tmp/r"))
+        XCTAssertEqual(login, "alamin-br")
+        XCTAssertEqual(fake.calls[0].arguments, ["api", "user", "--jq", ".login"])
+    }
+}
