@@ -63,6 +63,11 @@ public final class ReviewSession: ObservableObject {
     @Published public var data: SessionData
     @Published public var selectedFile: String?
     @Published public var selectedLines: ClosedRange<Int>?
+    /// Whether the centre pane shows every review comment instead of a diff.
+    @Published public var showComments = false
+    /// File whose section the comments list should scroll to when it opens,
+    /// set when the list is entered from a particular file.
+    @Published public var commentsScrollTarget: String?
     @Published public var agentState: AgentState = .idle
     public init(data: SessionData) { self.data = data }
     public func snapshot() -> SessionData { data }

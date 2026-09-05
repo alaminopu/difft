@@ -111,6 +111,7 @@ struct PROverviewView: View {
                         .foregroundStyle(.green).monospacedDigit()
                     Text(verbatim: "−\(String(model.files.reduce(0) { $0 + $1.deletions }))")
                         .foregroundStyle(.red).monospacedDigit()
+                    CommentsButton(session: session)
                     Spacer()
                     if let note = model.refreshNote {
                         Text(note)
@@ -152,7 +153,6 @@ struct PROverviewView: View {
                 Spacer(minLength: 0)
             }
             .padding(24)
-            .frame(maxWidth: 780, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -167,7 +167,9 @@ struct FileDiffContainer: View {
     var onAsk: (String, String) -> Void
 
     var body: some View {
-        if let path = session.selectedFile,
+        if session.showComments {
+            PRCommentsView(session: session)
+        } else if let path = session.selectedFile,
            let file = model.files.first(where: { $0.path == path }) {
             VStack(spacing: 0) {
                 FileHeaderBar(file: file,
@@ -260,9 +262,6 @@ struct MainSplitView: View {
                 ZStack {
                     Button("") { showRightPanel.toggle() }
                         .keyboardShortcut("0", modifiers: [.option, .command])
-                    Button("") { Task { await model.refreshPR() } }
-                        .keyboardShortcut("r", modifiers: .command)
-                        .disabled(model.session == nil || model.isRefreshing)
                 }
                 .hidden()
             )
@@ -396,5 +395,37 @@ struct StatusBar: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(.bar)
+    }
+}
+
+/// Opens the all-comments list from the PR overview, showing how many threads
+/// are waiting and how many of those are still unresolved.
+struct CommentsButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var session: ReviewSession
+
+    var body: some View {
+        let threads = CommentThread.group(model.comments)
+        let unresolved = threads.count { !$0.resolved }
+        Button {
+            session.showComments = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                Text(verbatim: "\(threads.count)")
+                    .monospacedDigit()
+                if unresolved > 0 {
+                    Text(verbatim: "(\(unresolved) unresolved)")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(threads.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+        .disabled(threads.isEmpty)
+        .help(threads.isEmpty
+              ? "No review comments on this pull request"
+              : "Show all review comments (⇧⌘C)")
+        .accessibilityLabel("Show all review comments")
     }
 }

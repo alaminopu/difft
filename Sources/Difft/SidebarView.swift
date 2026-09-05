@@ -266,6 +266,7 @@ private struct FileTreeNodeView: View {
         } else if let file = node.file {
             let isViewed = session.data.viewedFiles.contains(file.path)
             Button {
+                session.showComments = false
                 session.selectedFile = file.path
             } label: {
                 HStack(spacing: 6) {
@@ -279,12 +280,21 @@ private struct FileTreeNodeView: View {
                         .foregroundStyle(isViewed ? .secondary :
                             (session.selectedFile == file.path ? Color.accentColor : .primary))
                     Spacer(minLength: 4)
-                    let commentCount = model.comments.count(where: { $0.path == file.path })
+                    let commentCount = CommentThread
+                        .group(model.comments.filter { $0.path == file.path }).count
                     if commentCount > 0 {
-                        Label("\(commentCount)", systemImage: "bubble.left")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .labelStyle(.titleAndIcon)
+                        Button {
+                            session.commentsScrollTarget = file.path
+                            session.showComments = true
+                        } label: {
+                            Label("\(commentCount)", systemImage: "bubble.left")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show this file's review comments")
+                        .accessibilityLabel("\(commentCount) review thread\(commentCount == 1 ? "" : "s") on \(node.name)")
                     }
                     Text("+\(file.additions)")
                         .foregroundStyle(.green).font(.caption.monospacedDigit())

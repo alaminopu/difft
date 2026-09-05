@@ -369,12 +369,27 @@ extension MarkdownBodyView {
 
 /// Inline review-comment card, IntelliJ-style: author, age, body with fenced
 /// code blocks rendered as code, plus Reply and Resolve actions.
-struct CommentCardView: View {
+///
+/// `indented` is what the diff view needs and the comments list does not: in
+/// the diff the card floats under a code row and is inset to clear the gutter,
+/// while in a list it fills its container.
+public struct CommentCardView: View {
     let comment: ReviewComment
     var onReply: (String) -> Void = { _ in }
     var onResolve: () -> Void = {}
+    var indented: Bool = true
     @State private var replying = false
     @State private var replyText = ""
+
+    public init(comment: ReviewComment,
+                onReply: @escaping (String) -> Void = { _ in },
+                onResolve: @escaping () -> Void = {},
+                indented: Bool = true) {
+        self.comment = comment
+        self.onReply = onReply
+        self.onResolve = onResolve
+        self.indented = indented
+    }
 
     private var age: String {
         let fmt = ISO8601DateFormatter()
@@ -384,7 +399,7 @@ struct CommentCardView: View {
         return rel.localizedString(for: date, relativeTo: Date())
     }
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: comment.inReplyToID == nil ? "bubble.left" : "arrow.turn.down.right")
@@ -432,9 +447,10 @@ struct CommentCardView: View {
         }
         .opacity(comment.resolved ? 0.75 : 1)
         .padding(.vertical, 4)
-        .padding(.leading, comment.inReplyToID == nil ? 60 : 84)
-        .padding(.trailing, 16)
-        .frame(maxWidth: 760, alignment: .leading)
+        .padding(.leading, indented ? (comment.inReplyToID == nil ? 60 : 84)
+                                    : (comment.inReplyToID == nil ? 0 : 22))
+        .padding(.trailing, indented ? 16 : 0)
+        .frame(maxWidth: indented ? 760 : .infinity, alignment: .leading)
     }
 
     private func submitReply() {

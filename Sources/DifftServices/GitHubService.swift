@@ -31,16 +31,22 @@ public struct ReviewComment: Codable, Equatable, Identifiable, Sendable {
     public let side: String?
     public let createdAt: String
     public let inReplyToID: Int?
+    /// The few lines of diff GitHub anchors the comment to. Present on the
+    /// REST payload; kept so the comments list can show context without
+    /// opening the file.
+    public let diffHunk: String?
     /// GraphQL review-thread node id (needed to resolve) and its state,
     /// merged in after the REST fetch.
     public var threadID: String?
     public var resolved: Bool = false
     public init(id: Int, author: String, body: String, path: String, line: Int?,
                 side: String?, createdAt: String, inReplyToID: Int?,
+                diffHunk: String? = nil,
                 threadID: String? = nil, resolved: Bool = false) {
         self.id = id; self.author = author; self.body = body; self.path = path
         self.line = line; self.side = side; self.createdAt = createdAt
-        self.inReplyToID = inReplyToID; self.threadID = threadID; self.resolved = resolved
+        self.inReplyToID = inReplyToID; self.diffHunk = diffHunk
+        self.threadID = threadID; self.resolved = resolved
     }
 }
 
@@ -111,12 +117,13 @@ public final class GitHubService: Sendable {
             struct User: Codable { let login: String }
             let id: Int; let user: User; let body: String; let path: String
             let line: Int?; let side: String?; let created_at: String
-            let in_reply_to_id: Int?
+            let in_reply_to_id: Int?; let diff_hunk: String?
         }
         let raws = try JSONDecoder().decode([Raw].self, from: Data(r.stdout.utf8))
         return raws.map { ReviewComment(id: $0.id, author: $0.user.login, body: $0.body,
                                         path: $0.path, line: $0.line, side: $0.side,
-                                        createdAt: $0.created_at, inReplyToID: $0.in_reply_to_id) }
+                                        createdAt: $0.created_at, inReplyToID: $0.in_reply_to_id,
+                                        diffHunk: $0.diff_hunk) }
             .sorted { $0.createdAt < $1.createdAt }
     }
 

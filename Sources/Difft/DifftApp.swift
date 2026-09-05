@@ -18,6 +18,40 @@ struct DifftApp: App {
                 .task { await model.checkTools() }
                 .frame(minWidth: 1100, minHeight: 700)
         }
+        .commands { DifftCommands(model: model) }
+    }
+}
+
+/// Menu-bar commands. These live in the View menu rather than as hidden
+/// buttons in the window so the shortcuts are discoverable — a keystroke
+/// nobody can find is a feature nobody uses.
+struct DifftCommands: Commands {
+    @ObservedObject var model: AppModel
+
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            Divider()
+            Button("All Review Comments") {
+                model.session?.showComments = true
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .disabled(model.session == nil)
+
+            Button("Back to Pull Request Overview") {
+                model.session?.showComments = false
+                model.session?.selectedFile = nil
+            }
+            .keyboardShortcut("0", modifiers: .command)
+            .disabled(model.session == nil)
+
+            Divider()
+
+            Button("Refresh Pull Request") {
+                Task { await model.refreshPR() }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(model.session == nil || model.isRefreshing)
+        }
     }
 }
 
