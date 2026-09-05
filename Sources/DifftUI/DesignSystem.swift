@@ -165,3 +165,16 @@ public struct DiffMetrics: Equatable, Sendable {
         max(2, String(max(1, maxLine)).count)
     }
 }
+
+/// "owner/name" for the open checkout, so a markdown body can turn a bare
+/// commit SHA into a link without every call site threading it down.
+public struct RepoSlugKey: EnvironmentKey {
+    public static let defaultValue: String? = nil
+}
+
+public extension EnvironmentValues {
+    var repoSlug: String? {
+        get { self[RepoSlugKey.self] }
+        set { self[RepoSlugKey.self] = newValue }
+    }
+}

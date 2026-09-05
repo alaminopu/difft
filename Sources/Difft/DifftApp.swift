@@ -1,4 +1,5 @@
 import SwiftUI
+import DifftCore
 import DifftUI
 
 /// Appearance the user picked, independent of the system setting.
@@ -122,6 +123,15 @@ struct RootView: View {
         }
         // Keep the syntax palette in lockstep with the real appearance —
         // NSApp.effectiveAppearance lies during early launch.
+        .environment(\.repoSlug, model.repoSlug)
+        // A commit SHA in a comment opens in the diff viewer. Every other
+        // link still goes to the browser, so this handles only our scheme
+        // and declines the rest.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let sha = CommitReference.sha(from: url) else { return .systemAction }
+            Task { await model.openCommit(sha: sha) }
+            return .handled
+        })
         .onAppear { syncHighlighter() }
         .onChange(of: colorScheme) { _, _ in highlighter.setDark(isDark) }
         .onChange(of: appearance) { _, _ in highlighter.setDark(isDark) }

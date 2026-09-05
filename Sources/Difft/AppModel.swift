@@ -27,6 +27,9 @@ final class AppModel: ObservableObject {
     /// Signed-in login, so a comment card knows whether it is the user's own
     /// and can offer editing. nil until the first lookup succeeds.
     @Published private(set) var currentUserLogin: String?
+    /// "owner/name" for the open checkout, published so markdown bodies can
+    /// build commit links.
+    @Published private(set) var repoSlug: String?
     /// Files changed by the single commit currently drilled into, kept apart
     /// from `files` so opening a commit never disturbs the PR-wide diff.
     @Published var commitFiles: [FileDiff] = []
@@ -82,6 +85,7 @@ final class AppModel: ObservableObject {
         // Also the point a repo becomes known, which is what the login
         // lookup needs; at launch there may not be one yet.
         Task { await loadCurrentUser() }
+        Task { _ = await nameWithOwner(repoDir: repoDir) }
         do { prs = try await github.listPRs(repoDir: repoDir); errorBanner = nil }
         catch { errorBanner = "Failed to list PRs: \(error.localizedDescription)" }
     }
@@ -100,6 +104,7 @@ final class AppModel: ObservableObject {
         if let cached = cachedNameWithOwner, cached.dir == repoDir { return cached.value }
         guard let value = try? await github.nameWithOwner(repoDir: repoDir) else { return nil }
         cachedNameWithOwner = (repoDir, value)
+        repoSlug = value
         return value
     }
 
@@ -226,6 +231,50 @@ final class AppModel: ObservableObject {
         session?.showComments = false
         session?.showCommits = false
         closeCommit()
+    }
+
+    /// Opens the commit a review comment referred to.
+    ///
+    /// Usually it is one of the PR's own commits, but a comment can name one
+    /// from the base branch or another PR, so an unmatched SHA is looked up
+    /// in the worktree before giving up. If even git does not know it — a
+    /// commit from a fork, say — the reader is sent to GitHub rather than
+    /// shown nothing.
+    func openCommit(sha: String) async {
+        guard let session else { return }
+
+        if let known = commits.first(where: { $0.sha.hasPrefix(sha) }) {
+            session.showComments = false
+            session.showCommits = true
+            await openCommit(known)
+            return
+        }
+
+        let worktree = Self.appSupportDir
+            .appendingPathComponent("worktrees/\(repoName)-pr\(session.data.pr.number)")
+        // %x1f separates fields; the subject and body can contain anything.
+        let format = "%H%x1f%an%x1f%aI%x1f%s%x1f%b"
+        if let r = try? await processRunner.run(
+                "git", arguments: ["show", "-s", "--format=\(format)", sha],
+                currentDirectory: worktree),
+           r.exitCode == 0 {
+            let parts = r.stdout.components(separatedBy: "\u{1f}")
+            if parts.count >= 4 {
+                let resolved = Commit(sha: parts[0], subject: parts[3],
+                                      body: parts.count > 4 ? parts[4] : "",
+                                      author: parts[1], date: parts[2])
+                session.showComments = false
+                session.showCommits = true
+                await openCommit(resolved)
+                return
+            }
+        }
+
+        if let slug = repoSlug, let url = URL(string: "https://github.com/\(slug)/commit/\(sha)") {
+            NSWorkspace.shared.open(url)
+        } else {
+            errorBanner = "Commit \(sha) is not in this checkout."
+        }
     }
 
     func closeCommit() {

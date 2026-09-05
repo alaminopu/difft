@@ -371,6 +371,7 @@ public struct MarkdownBodyView: View {
     public let text: String
     @EnvironmentObject var highlighter: HighlightService
     @AppStorage(PrefKey.codeFontFamily) private var codeFontFamily = CodeFont.systemFamily
+    @Environment(\.repoSlug) private var repoSlug
 
     public init(text: String) { self.text = text }
 
@@ -389,7 +390,7 @@ public struct MarkdownBodyView: View {
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            Text(Self.inline(chunk.text, codeFamily: codeFontFamily))
+                            Text(Self.inline(chunk.text, codeFamily: codeFontFamily, repoSlug: repoSlug))
                                 .font(Typography.body)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -416,7 +417,8 @@ extension MarkdownBodyView {
     /// `inlinePresentationIntent = .code`, but nothing acts on that intent, so
     /// inline code came out looking exactly like the prose around it — which
     /// matters in review comments, where half the sentence is identifiers.
-    static func inline(_ markdown: String, codeFamily: String) -> AttributedString {
+    static func inline(_ markdown: String, codeFamily: String,
+                       repoSlug: String? = nil) -> AttributedString {
         guard var attr = try? AttributedString(
             markdown: markdown,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
@@ -431,7 +433,40 @@ extension MarkdownBodyView {
             attr[range].font = CodeFont.swiftUIFont(family: codeFamily, size: 12)
             attr[range].backgroundColor = Palette.inlineCode
         }
+        linkCommitReferences(in: &attr, repoSlug: repoSlug, codeFamily: codeFamily)
         return attr
+    }
+
+    /// Turns bare SHAs into links to the commit, the way GitHub does with
+    /// "Fixed in d59f520cc".
+    ///
+    /// Spans already carrying a link or code styling are skipped: a SHA
+    /// inside backticks was written as literal text, and one inside an
+    /// existing link already goes somewhere.
+    private static func linkCommitReferences(in attr: inout AttributedString,
+                                             repoSlug: String?, codeFamily: String) {
+        // No repo means no PR is open, so there is no worktree to resolve a
+        // SHA against and nothing useful a link could do.
+        guard repoSlug != nil else { return }
+        let plain = String(attr.characters)
+
+        // Applying links shifts nothing, but walking back to front keeps the
+        // offsets valid regardless of how attribute runs get split.
+        for range in CommitReference.ranges(in: plain).reversed() {
+            guard let lo = attr.index(attr.startIndex, offsetByCharacters: range.lowerBound)
+                    as AttributedString.Index?,
+                  let hi = attr.index(attr.startIndex, offsetByCharacters: range.upperBound)
+                    as AttributedString.Index? else { continue }
+            let slice = attr[lo..<hi]
+            if slice.runs.contains(where: {
+                $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true
+            }) { continue }
+
+            let sha = String(Array(plain)[range])
+            guard let url = CommitReference.url(sha: sha) else { continue }
+            attr[lo..<hi].link = url
+            attr[lo..<hi].font = CodeFont.swiftUIFont(family: codeFamily, size: 12)
+        }
     }
 
     struct Chunk { let text: String; let isHeading: Bool }

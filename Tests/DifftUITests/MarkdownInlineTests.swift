@@ -46,3 +46,46 @@ final class MarkdownInlineTests: XCTestCase {
         XCTAssertTrue(String(attr.characters).contains("unclosed span"))
     }
 }
+
+extension MarkdownInlineTests {
+    private func links(_ markdown: String, repo: String? = "alaminopu/difft") -> [String] {
+        let attr = MarkdownBodyView.inline(markdown, codeFamily: CodeFont.systemFamily, repoSlug: repo)
+        return attr.runs.compactMap { $0.link?.absoluteString }
+    }
+
+    /// The link is internal: clicking a SHA opens the commit in the diff
+    /// viewer rather than handing the reader to a browser.
+    func testBareShasBecomeInternalCommitLinks() {
+        XCTAssertEqual(links("Fixed in d59f520cc and b32db62bf."), [
+            "difft-commit://commit/d59f520cc",
+            "difft-commit://commit/b32db62bf",
+        ])
+    }
+
+    /// Without a repo there is nowhere for the link to point.
+    func testNoRepoMeansNoLinks() {
+        XCTAssertTrue(links("Fixed in d59f520cc.", repo: nil).isEmpty)
+    }
+
+    /// A SHA in backticks was written as literal text.
+    func testShaInsideCodeSpanIsNotLinked() {
+        XCTAssertTrue(links("run `git show d59f520cc` first").isEmpty)
+    }
+
+    /// An explicit markdown link must keep its own destination.
+    func testExistingLinkIsNotOverwritten() {
+        let got = links("[d59f520cc](https://example.com/x)")
+        XCTAssertEqual(got, ["https://example.com/x"])
+    }
+
+    func testPlainNumbersAreNotLinked() {
+        XCTAssertTrue(links("see line 1234567 of the file").isEmpty)
+    }
+
+    func testProseAroundTheShaSurvives() {
+        let attr = MarkdownBodyView.inline("Fixed in d59f520cc.",
+                                           codeFamily: CodeFont.systemFamily,
+                                           repoSlug: "alaminopu/difft")
+        XCTAssertEqual(String(attr.characters), "Fixed in d59f520cc.")
+    }
+}
