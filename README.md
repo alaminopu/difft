@@ -33,7 +33,7 @@ Pure SwiftUI, no web view. Side-by-side or unified, full-file context, word-leve
 
 ![A review comment anchored to its line in the diff](docs/screenshots/inline-comment.png)
 
-Threads render under the line they belong to, with `inline code` set as code. Reply, resolve, and edit your own without leaving the app. Select lines and right-click to start a new thread. A commit named in prose — "fixed in d59f520cc" — opens that commit's diff here rather than in a browser.
+Threads render under the line they belong to, markdown and code blocks intact. Reply, resolve, or edit your own; select lines and right-click to start a new one. Even a commit mentioned in passing — "fixed in d59f520cc" — opens its diff here rather than in a browser.
 
 **⇧⌘C** lists every thread grouped by file, filtered by resolved state and searchable across bodies, authors and paths. Each shows the hunk it anchors to, and jumps to the line.
 
