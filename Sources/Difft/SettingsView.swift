@@ -35,11 +35,20 @@ struct SettingsView: View {
                         in: DiffMetrics.minFontSize...DiffMetrics.maxFontSize) {
                     Text("Size: \(diffFontSize)pt")
                 }
-                Text(preview)
-                    .font(Typography.code(family: codeFontFamily, size: CGFloat(diffFontSize)))
+                LabeledContent("Preview") {
+                    VStack(alignment: .leading, spacing: Spacing.xxs) {
+                        Text(preview)
+                            .font(Typography.code(family: codeFontFamily,
+                                                  size: CGFloat(diffFontSize)))
+                            .textSelection(.enabled)
+                        Text("Zero and capital O, one and lowercase L, brackets, operators.")
+                            .font(Typography.meta)
+                            .foregroundStyle(.secondary)
+                    }
                     .padding(Spacing.sm)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
+                }
             }
         }
         .formStyle(.grouped)
@@ -47,6 +56,12 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// Characters that separate a good code font from a bad one.
-    private var preview: String { "0O1lI  {} []  a→b  == != <=" }
+    /// Characters that separate a good code font from a bad one: the glyphs
+    /// that get confused for each other, and the operators a ligature font
+    /// draws as one mark.
+    ///
+    /// `->` is written literally rather than as an arrow — a font with
+    /// ligatures is exactly one that turns it into an arrow, so a literal
+    /// arrow here would look identical in every font and test nothing.
+    private var preview: String { "0O1lI  {}[]  ->  ==  !=  <=" }
 }
