@@ -11,6 +11,11 @@ final class AppModel: ObservableObject {
     @Published var session: ReviewSession?
     @Published var files: [FileDiff] = []
     @Published var comments: [ReviewComment] = []
+    @Published var commits: [Commit] = []
+    /// Files changed by the single commit currently drilled into, kept apart
+    /// from `files` so opening a commit never disturbs the PR-wide diff.
+    @Published var commitFiles: [FileDiff] = []
+    @Published var isLoadingCommit = false
     @Published var toolCheck: (gh: Bool, ghAuth: Bool, claude: Bool)?
     @Published var errorBanner: String?
     /// Set by the overview's Explain button; consumed by the assistant panel.
@@ -119,12 +124,14 @@ final class AppModel: ObservableObject {
             // Comments (REST + GraphQL threads) load concurrently with the
             // diff instead of after it.
             async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
+            async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
             if let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr) {
                 files = full
             } else {
                 files = try await github.fetchDiff(repoDir: repoDir, number: pr.number)
             }
             comments = await commentsTask
+            commits = await commitsTask
             currentHead = try? await processRunner.run(
                 "git", arguments: ["rev-parse", "HEAD"],
                 currentDirectory: Self.appSupportDir
@@ -137,6 +144,49 @@ final class AppModel: ObservableObject {
             session?.selectedFile = nil
             errorBanner = nil
         } catch { errorBanner = "Failed to open PR #\(pr.number): \(error.localizedDescription)" }
+    }
+
+    /// Loads the diff a single commit introduced, against its own parent,
+    /// with the same unlimited context the PR diff uses. Reads the PR's
+    /// worktree, which is the only checkout guaranteed to hold the commit.
+    func openCommit(_ commit: Commit) async {
+        guard let session else { return }
+        session.selectedCommit = commit
+        session.selectedCommitFile = nil
+        commitFiles = []
+        isLoadingCommit = true
+        defer { isLoadingCommit = false }
+        let worktree = Self.appSupportDir
+            .appendingPathComponent("worktrees/\(repoName)-pr\(session.data.pr.number)")
+        guard let r = try? await processRunner.run(
+                "git", arguments: ["show", "--format=", "-U100000", commit.sha],
+                currentDirectory: worktree),
+              r.exitCode == 0 else {
+            errorBanner = "Failed to load commit \(commit.shortSHA)"
+            return
+        }
+        // Parsing a full-context diff on the main actor freezes the UI, the
+        // same reason the PR diff parses off it.
+        let text = r.stdout
+        commitFiles = await Task.detached(priority: .userInitiated) {
+            DiffParser.parse(text)
+        }.value
+        session.selectedCommitFile = commitFiles.first?.path
+        errorBanner = nil
+    }
+
+    func closeCommit() {
+        session?.selectedCommit = nil
+        session?.selectedCommitFile = nil
+        commitFiles = []
+    }
+
+    /// Newest first, the way GitHub and `git log` present history. Failure
+    /// yields an empty list rather than throwing — commits are secondary to
+    /// the diff, and losing them should not fail opening the PR.
+    private func loadCommits(repoDir: URL, number: Int) async -> [Commit] {
+        let loaded = (try? await github.fetchCommits(repoDir: repoDir, number: number)) ?? []
+        return loaded.sorted { $0.date > $1.date }
     }
 
     private func loadComments(repoDir: URL, number: Int) async -> [ReviewComment] {
@@ -190,12 +240,14 @@ final class AppModel: ObservableObject {
             let head = try await worktrees.refreshWorktree(
                 cloneDir: repoDir, repoName: repoName, prNumber: pr.number)
             async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
+            async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
             if let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr) {
                 files = full
             } else {
                 files = try await github.fetchDiff(repoDir: repoDir, number: pr.number)
             }
             comments = await commentsTask
+            commits = await commitsTask
             currentHead = head
             // Keep the open file if it still exists in the refreshed diff.
             if let selected = session.selectedFile,

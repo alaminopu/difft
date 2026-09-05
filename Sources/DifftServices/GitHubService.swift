@@ -50,6 +50,30 @@ public struct ReviewComment: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+
+/// One commit on a PR. GitHub's own commits tab shows message, author, date
+/// and sha with no per-commit stats, and the list endpoint carries none
+/// either, so neither does this.
+public struct Commit: Codable, Equatable, Identifiable, Sendable {
+    public let sha: String
+    /// First line of the commit message.
+    public let subject: String
+    /// Everything after the first line; empty when the message is one line.
+    public let body: String
+    public let author: String
+    /// ISO8601, the date the commit was authored.
+    public let date: String
+
+    public init(sha: String, subject: String, body: String, author: String, date: String) {
+        self.sha = sha; self.subject = subject; self.body = body
+        self.author = author; self.date = date
+    }
+
+    public var id: String { sha }
+    public var shortSHA: String { String(sha.prefix(7)) }
+    public var hasBody: Bool { !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+
 /// A comment body split for rendering: prose segments (inline markdown) and
 /// fenced code blocks.
 public enum CommentBodySegment: Equatable, Sendable {
@@ -125,6 +149,33 @@ public final class GitHubService: Sendable {
                                         createdAt: $0.created_at, inReplyToID: $0.in_reply_to_id,
                                         diffHunk: $0.diff_hunk) }
             .sorted { $0.createdAt < $1.createdAt }
+    }
+
+
+    public func fetchCommits(repoDir: URL, number: Int) async throws -> [Commit] {
+        let r = try await runner.run("gh", arguments: [
+            "pr", "view", String(number), "--json", "commits",
+        ], currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        struct Raw: Codable {
+            struct Wrapper: Codable { let commits: [C] }
+            struct C: Codable {
+                struct Author: Codable { let login: String?; let name: String? }
+                let oid: String
+                let messageHeadline: String
+                let messageBody: String?
+                let authoredDate: String
+                let authors: [Author]?
+            }
+        }
+        let wrapper = try JSONDecoder().decode(Raw.Wrapper.self, from: Data(r.stdout.utf8))
+        return wrapper.commits.map { c in
+            // A commit authored outside GitHub has no login, only the name
+            // from the git trailer; showing nothing there would be worse.
+            let who = c.authors?.first.flatMap { $0.login ?? $0.name } ?? ""
+            return Commit(sha: c.oid, subject: c.messageHeadline,
+                          body: c.messageBody ?? "", author: who, date: c.authoredDate)
+        }
     }
 
     /// Maps each comment's databaseId to its review thread (GraphQL id +

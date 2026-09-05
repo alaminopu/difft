@@ -65,6 +65,12 @@ public final class ReviewSession: ObservableObject {
     @Published public var selectedLines: ClosedRange<Int>?
     /// Whether the centre pane shows every review comment instead of a diff.
     @Published public var showComments = false
+    /// Whether the centre pane shows the PR's commits instead of a diff.
+    @Published public var showCommits = false
+    /// Commit whose own diff is open, drilled into from the commits list.
+    @Published public var selectedCommit: Commit?
+    /// File selected within that commit's diff.
+    @Published public var selectedCommitFile: String?
     /// File whose section the comments list should scroll to when it opens,
     /// set when the list is entered from a particular file.
     @Published public var commentsScrollTarget: String?

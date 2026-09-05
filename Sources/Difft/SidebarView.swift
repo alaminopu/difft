@@ -23,7 +23,7 @@ struct SidebarView: View {
                         model.repoDir = url
                         model.session = nil
                         model.files = []
-                        model.comments = []
+                        model.comments = []; model.commits = []
                         Task { await model.loadPRs() }
                     }
                 } label: {
@@ -203,7 +203,7 @@ struct FileTreeView: View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Button {
-                    model.session = nil; model.files = []; model.comments = []
+                    model.session = nil; model.files = []; model.comments = []; model.commits = []
                 } label: {
                     Label("PRs", systemImage: "chevron.left")
                 }
@@ -267,6 +267,8 @@ private struct FileTreeNodeView: View {
             let isViewed = session.data.viewedFiles.contains(file.path)
             Button {
                 session.showComments = false
+                session.showCommits = false
+                model.closeCommit()
                 session.selectedFile = file.path
             } label: {
                 HStack(spacing: 6) {
@@ -285,6 +287,7 @@ private struct FileTreeNodeView: View {
                     if commentCount > 0 {
                         Button {
                             session.commentsScrollTarget = file.path
+                            session.showCommits = false
                             session.showComments = true
                         } label: {
                             Label("\(commentCount)", systemImage: "bubble.left")

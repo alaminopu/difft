@@ -112,6 +112,7 @@ struct PROverviewView: View {
                     Text(verbatim: "−\(String(model.files.reduce(0) { $0 + $1.deletions }))")
                         .foregroundStyle(.red).monospacedDigit()
                     CommentsButton(session: session)
+                    CommitsButton(session: session)
                     Spacer()
                     if let note = model.refreshNote {
                         Text(note)
@@ -167,7 +168,13 @@ struct FileDiffContainer: View {
     var onAsk: (String, String) -> Void
 
     var body: some View {
-        if session.showComments {
+        if session.showCommits {
+            if let commit = session.selectedCommit {
+                CommitDiffView(session: session, commit: commit, onAsk: onAsk)
+            } else {
+                PRCommitsView(session: session)
+            }
+        } else if session.showComments {
             PRCommentsView(session: session)
         } else if let path = session.selectedFile,
            let file = model.files.first(where: { $0.path == path }) {
@@ -408,6 +415,7 @@ struct CommentsButton: View {
         let threads = CommentThread.group(model.comments)
         let unresolved = threads.count { !$0.resolved }
         Button {
+            session.showCommits = false
             session.showComments = true
         } label: {
             HStack(spacing: 4) {
@@ -427,5 +435,32 @@ struct CommentsButton: View {
               ? "No review comments on this pull request"
               : "Show all review comments (⇧⌘C)")
         .accessibilityLabel("Show all review comments")
+    }
+}
+
+/// Opens the commits list from the PR overview.
+struct CommitsButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var session: ReviewSession
+
+    var body: some View {
+        Button {
+            session.showComments = false
+            // Land on the list, not on whichever commit was open last.
+            model.closeCommit()
+            session.showCommits = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                Text(verbatim: "\(model.commits.count)").monospacedDigit()
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(model.commits.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+        .disabled(model.commits.isEmpty)
+        .help(model.commits.isEmpty
+              ? "No commits on this pull request"
+              : "Show all commits (\u{21E7}\u{2318}K)")
+        .accessibilityLabel("Show all commits")
     }
 }

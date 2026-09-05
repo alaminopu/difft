@@ -109,4 +109,60 @@ final class GitHubServiceTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertGreaterThan(result.stdout.count, 128000)
     }
+
+    func testFetchCommitsParsesGhJSON() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        {"commits": [
+          {"oid": "abc1234567890", "messageHeadline": "Fix the thing", "messageBody": "Longer\\nexplanation",
+           "authoredDate": "2026-03-01T10:00:00Z", "authors": [{"login": "alice", "name": "Alice A"}]}
+        ]}
+        """, stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let commits = try await svc.fetchCommits(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+        XCTAssertEqual(commits.count, 1)
+        XCTAssertEqual(commits[0].sha, "abc1234567890")
+        XCTAssertEqual(commits[0].shortSHA, "abc1234")
+        XCTAssertEqual(commits[0].subject, "Fix the thing")
+        XCTAssertEqual(commits[0].author, "alice")
+        XCTAssertTrue(commits[0].hasBody)
+        XCTAssertEqual(fake.calls[0].arguments, ["pr", "view", "7", "--json", "commits"])
+    }
+
+    /// A commit authored outside GitHub carries only a git name, no login.
+    func testFetchCommitsFallsBackToAuthorName() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        {"commits": [
+          {"oid": "deadbeef", "messageHeadline": "Vendored change", "messageBody": "",
+           "authoredDate": "2026-03-01T10:00:00Z", "authors": [{"login": null, "name": "Offline Contributor"}]}
+        ]}
+        """, stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let commits = try await svc.fetchCommits(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+        XCTAssertEqual(commits[0].author, "Offline Contributor")
+        XCTAssertFalse(commits[0].hasBody)
+    }
+
+    /// A PR whose commits list came back empty must not throw.
+    func testFetchCommitsHandlesNoAuthorsAndEmptyList() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: #"{"commits": []}"#, stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let commits = try await svc.fetchCommits(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+        XCTAssertTrue(commits.isEmpty)
+    }
+
+    func testFetchCommitsThrowsOnFailure() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "", stderr: "no such PR", exitCode: 1)]
+        let svc = GitHubService(runner: fake)
+        do {
+            _ = try await svc.fetchCommits(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? GitHubServiceError, .commandFailed("no such PR"))
+        }
+    }
+
 }

@@ -334,7 +334,7 @@ public struct MarkdownBodyView: View {
                             .textSelection(.enabled)
                             .padding(8)
                     }
-                    .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 6))
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
