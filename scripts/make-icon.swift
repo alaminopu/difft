@@ -1,12 +1,12 @@
-// Renders the Difft app icon (Claude-design: Anthropic clay/cream) to a PNG.
+// Renders the Difft app icon (red/cream) to a PNG.
 // Usage: swift scripts/make-icon.swift <out.png> [size]
 import AppKit
 
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png"
 let S = CGFloat(CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2])! : 1024)
 
-let clay = NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1)        // #D97757
-let clayDark = NSColor(red: 0.76, green: 0.38, blue: 0.26, alpha: 1)
+let red = NSColor(red: 0.81, green: 0.13, blue: 0.18, alpha: 1)         // #CF212E
+let redDark = NSColor(red: 0.64, green: 0.09, blue: 0.13, alpha: 1)     // #A31721
 let cream = NSColor(red: 0.98, green: 0.96, blue: 0.93, alpha: 1)       // #FAF5EE
 let creamDim = NSColor(red: 0.98, green: 0.96, blue: 0.93, alpha: 0.55)
 
@@ -20,7 +20,7 @@ let bg = CGRect(x: inset, y: inset, width: S - 2 * inset, height: S - 2 * inset)
 let bgPath = CGPath(roundedRect: bg, cornerWidth: S * 0.16, cornerHeight: S * 0.16, transform: nil)
 ctx.addPath(bgPath); ctx.clip()
 let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                      colors: [clay.cgColor, clayDark.cgColor] as CFArray, locations: [0, 1])!
+                      colors: [red.cgColor, redDark.cgColor] as CFArray, locations: [0, 1])!
 ctx.drawLinearGradient(grad, start: CGPoint(x: S/2, y: S - inset), end: CGPoint(x: S/2, y: inset), options: [])
 
 // Two diff columns of rounded bars meeting at a center divider.
@@ -88,7 +88,7 @@ func dot(_ x: CGFloat, _ y: CGFloat, filled: Bool) {
         ctx.setFillColor(cream.cgColor)
         ctx.fillEllipse(in: rect)
     } else {
-        ctx.setFillColor(clayDark.cgColor)
+        ctx.setFillColor(redDark.cgColor)
         ctx.fillEllipse(in: rect)
         ctx.setStrokeColor(cream.cgColor)
         ctx.setLineWidth(lw2)
