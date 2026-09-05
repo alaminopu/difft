@@ -4,7 +4,7 @@ A native macOS app for reviewing GitHub pull requests.
 
 Difft shows every changed file in full — not just the changed hunks. Changes are highlighted inline, line numbers meet at a draggable center gutter, and review comments appear as cards anchored to the exact line they belong to. Alongside the diff you get every review thread in one list, the branch's commits, and the diff any single commit introduced.
 
-![Difft showing a side-by-side diff](docs/screenshots/screenshot.png)
+![Side-by-side diff with word-level emphasis](docs/screenshots/diff.png)
 
 ## Features
 
@@ -18,7 +18,8 @@ Pure SwiftUI — no web view.
 - Word-level emphasis on what actually changed
 - A change-overview rail for jumping between edits in long files
 - Draggable split between the old and new sides
-- Click a line to select it, drag or shift-click for a range, right-click to copy
+- Click a line to select it, drag or shift-click for a range, right-click to copy or comment
+- Your choice of monospaced font and size, applied to the syntax highlighting itself
 
 ### Pull requests
 
@@ -29,9 +30,19 @@ PRs load through the `gh` CLI, so there is no OAuth flow and no tokens to manage
 - Changed files show as a collapsible tree with per-folder counts
 - Viewed checkboxes, and a badge per file showing its review threads
 
+![PR overview with the description rendered as markdown](docs/screenshots/overview.png)
+
 ### Review comments
 
-Inline comments from GitHub render under the line they anchor to, threads and all, with code blocks syntax-highlighted. Reply and resolve without leaving the app.
+Inline comments from GitHub render under the line they anchor to, threads and all, with code blocks syntax-highlighted — and `inline code` set as code, since half a review sentence is usually identifiers.
+
+![A review comment anchored to its line in the diff](docs/screenshots/inline-comment.png)
+
+Reply and resolve without leaving the app. Your own comments get an **Edit** action; other people's do not, so there is no button that could only fail.
+
+**Write a comment from the diff.** Select lines, right-click, *Comment on selection*. The composer names exactly where it will land. Because GitHub anchors review comments to the new file, a selection covering pure deletions narrows to the lines that can carry one.
+
+**Commits named in prose are links.** "Fixed in d59f520cc" opens that commit's diff *in the app*, not a browser — resolved from the PR's commits, or from the worktree when the comment names a commit from elsewhere.
 
 **All comments in one place** (⇧⌘C) answers the question you have before you know which file to open: what has been said at all. Every thread, grouped by file.
 
@@ -42,15 +53,26 @@ Inline comments from GitHub render under the line they anchor to, threads and al
 - Jump straight from a thread to its line in the diff
 - Comments GitHub can no longer anchor, because the diff moved past them, are marked outdated rather than dropped
 
+![Every review thread on the PR, grouped by file](docs/screenshots/comments.png)
+
 ### Commits
 
 **All commits** (⇧⌘K) lists the PR's commits newest first, grouped by the day they were authored. Search by message, author, or sha prefix, and expand any commit to read its full message.
 
+![Commits grouped by the day they were authored](docs/screenshots/commits.png)
+
 Click a commit to see the diff it introduced against its own parent — the same full-file context as the PR diff, with its own list of changed files. Review comments are left out there on purpose: they anchor to lines in the PR head, so on an earlier commit they would point at the wrong code.
 
-### Appearance
+### Settings
 
-Light, Dark, or Match System, from **View → Appearance**. The choice persists across launches, and the syntax palette follows it.
+⌘, opens preferences:
+
+- **Appearance** — Light, Dark, or Match System
+- **Syntax colours** — Atom One, Xcode, GitHub, Nord, or Solarized, each a light/dark pair
+- **Code font** — any monospaced font installed on your Mac, defaulting to SF Mono, with a preview of the characters that separate a good one from a bad one
+- **Size** — 9 to 18pt
+
+The font and size are pushed into the syntax highlighter rather than applied around it, so they reach the highlighted code itself.
 
 ### Assistant
 
@@ -81,6 +103,8 @@ One click writes a self-contained HTML file to `~/Documents/Difft-reports/` and 
 | `⌘0` | Back to the PR overview |
 | `⌘R` | Refresh the PR |
 | `⌥⌘0` | Show or hide the assistant panel |
+| `⌘,` | Settings |
+| `⌘↩` | Post the comment you are writing |
 | `j` / `k` | Next / previous file in the diff |
 
 ## Requirements
@@ -114,7 +138,7 @@ Difft is a Swift package with four targets:
 | `Difft` | The app |
 
 ```sh
-swift test        # 94 tests — no network or CLI needed, subprocesses are faked
+swift test        # 170 tests — no network or CLI needed, subprocesses are faked
 swift run Difft   # dev build
 ```
 
