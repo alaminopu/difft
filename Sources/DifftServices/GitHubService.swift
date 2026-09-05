@@ -178,12 +178,20 @@ public final class GitHubService: Sendable {
         }
     }
 
-    /// Maps each comment's databaseId to its review thread (GraphQL id +
-    /// resolved flag) so the UI can offer resolve and show state.
-    public func fetchThreadInfo(repoDir: URL, number: Int) async throws -> [Int: (threadID: String, resolved: Bool)] {
+    /// "owner/name" for the checkout. Its own `gh` invocation costs about half
+    /// a second, and it cannot change while a repo is open, so callers are
+    /// expected to fetch it once and hold it.
+    public func nameWithOwner(repoDir: URL) async throws -> String {
         let who = try await runner.run("gh", arguments: ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], currentDirectory: repoDir)
         guard who.exitCode == 0 else { throw GitHubServiceError.commandFailed(who.stderr) }
-        let parts = who.stdout.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
+        return who.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Maps each comment's databaseId to its review thread (GraphQL id +
+    /// resolved flag) so the UI can offer resolve and show state.
+    public func fetchThreadInfo(repoDir: URL, number: Int,
+                                nameWithOwner: String) async throws -> [Int: (threadID: String, resolved: Bool)] {
+        let parts = nameWithOwner.split(separator: "/")
         guard parts.count == 2 else { throw GitHubServiceError.commandFailed("bad nameWithOwner") }
         let query = """
         query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}}}}}}

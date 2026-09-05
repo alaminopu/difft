@@ -113,8 +113,16 @@ private struct PRListView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(pr.title).lineLimit(2)
                         Label(pr.authorLogin, systemImage: "person")
-                            .font(.caption)
+                            .font(Typography.meta)
                             .foregroundStyle(.secondary)
+                    }
+                    // A first open has to check the PR out into a worktree,
+                    // which is not quick on a large repo. Without this the
+                    // click looked like it had not registered.
+                    if model.openingPRNumber == pr.number {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(.leading, Spacing.xs)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

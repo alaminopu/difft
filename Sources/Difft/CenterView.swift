@@ -425,56 +425,65 @@ struct CommentsButton: View {
     @ObservedObject var session: ReviewSession
 
     var body: some View {
-        let threads = CommentThread.group(model.comments)
-        let unresolved = threads.count { !$0.resolved }
-        Button {
-            model.closeCommit()
-            session.showCommits = false
-            session.showComments = true
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                Text(verbatim: "\(threads.count)")
-                    .monospacedDigit()
-                if unresolved > 0 {
-                    Text(verbatim: "(\(unresolved) unresolved)")
-                        .foregroundStyle(.orange)
+        // Comments arrive after the diff now, so a bare "0" while they are
+        // still in flight would be a wrong answer rather than a pending one.
+        if model.isLoadingDetails {
+            ProgressView().controlSize(.small)
+        } else {
+            let threads = CommentThread.group(model.comments)
+            let unresolved = threads.count { !$0.resolved }
+            Button {
+                model.closeCommit()
+                session.showCommits = false
+                session.showComments = true
+            } label: {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                    Text(verbatim: "\(threads.count)")
+                        .monospacedDigit()
+                    if unresolved > 0 {
+                        Text(verbatim: "(\(unresolved) unresolved)")
+                            .foregroundStyle(Palette.warning)
+                    }
                 }
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(threads.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+            .disabled(threads.isEmpty)
+            .help(threads.isEmpty
+                  ? "No review comments on this pull request"
+                  : "Show all review comments (⇧⌘C)")
+            .accessibilityLabel("Show all review comments")
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(threads.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-        .disabled(threads.isEmpty)
-        .help(threads.isEmpty
-              ? "No review comments on this pull request"
-              : "Show all review comments (⇧⌘C)")
-        .accessibilityLabel("Show all review comments")
     }
 }
 
-/// Opens the commits list from the PR overview.
 struct CommitsButton: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var session: ReviewSession
 
     var body: some View {
-        Button {
-            session.showComments = false
-            // Land on the list, not on whichever commit was open last.
-            model.closeCommit()
-            session.showCommits = true
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
-                Text(verbatim: "\(model.commits.count)").monospacedDigit()
+        if model.isLoadingDetails {
+            ProgressView().controlSize(.small)
+        } else {
+            Button {
+                session.showComments = false
+                // Land on the list, not on whichever commit was open last.
+                model.closeCommit()
+                session.showCommits = true
+            } label: {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: "arrow.triangle.branch")
+                    Text(verbatim: "\(model.commits.count)").monospacedDigit()
+                }
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(model.commits.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+            .disabled(model.commits.isEmpty)
+            .help(model.commits.isEmpty
+                  ? "No commits on this pull request"
+                  : "Show all commits (⇧⌘K)")
+            .accessibilityLabel("Show all commits")
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(model.commits.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-        .disabled(model.commits.isEmpty)
-        .help(model.commits.isEmpty
-              ? "No commits on this pull request"
-              : "Show all commits (\u{21E7}\u{2318}K)")
-        .accessibilityLabel("Show all commits")
     }
 }

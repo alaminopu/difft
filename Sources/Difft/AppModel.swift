@@ -18,6 +18,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var fileTree: [FileTreeNode] = []
     @Published var comments: [ReviewComment] = []
     @Published var commits: [Commit] = []
+    /// The PR being opened, so the list and centre pane can say so. Opening
+    /// waits on `gh`, and without this the app looked frozen on click.
+    @Published var openingPRNumber: Int?
+    /// Comments and commits arrive after the diff; the overview shows their
+    /// counts, so it needs to know they are still on the way.
+    @Published var isLoadingDetails = false
     /// Files changed by the single commit currently drilled into, kept apart
     /// from `files` so opening a commit never disturbs the PR-wide diff.
     @Published var commitFiles: [FileDiff] = []
@@ -79,6 +85,18 @@ final class AppModel: ObservableObject {
     /// interleaved opens can pair one PR's files with another's session.
     private var openingPR: Int?
 
+    /// "owner/name" costs its own ~0.5s `gh` call and cannot change while a
+    /// repo is open, so it is fetched once per checkout rather than on every
+    /// open and every refresh.
+    private var cachedNameWithOwner: (dir: URL, value: String)?
+
+    private func nameWithOwner(repoDir: URL) async -> String? {
+        if let cached = cachedNameWithOwner, cached.dir == repoDir { return cached.value }
+        guard let value = try? await github.nameWithOwner(repoDir: repoDir) else { return nil }
+        cachedNameWithOwner = (repoDir, value)
+        return value
+    }
+
     /// IntelliJ-style full-file diff: check the PR out into its worktree and
     /// diff against the base branch with unlimited context, so every line of
     /// each changed file renders (changes highlighted inline). Falls back to
@@ -125,10 +143,16 @@ final class AppModel: ObservableObject {
     func openPR(_ pr: PullRequest) async {
         guard let repoDir, openingPR == nil else { return }
         openingPR = pr.number
-        defer { openingPR = nil }
+        openingPRNumber = pr.number
+        isLoadingDetails = true
+        defer { openingPR = nil; openingPRNumber = nil; isLoadingDetails = false }
+        // The previous PR's comments and commits must not linger while this
+        // one loads — they would be attributed to the wrong PR on screen.
+        comments = []
+        commits = []
         do {
-            // Comments (REST + GraphQL threads) load concurrently with the
-            // diff instead of after it.
+            // Comments (REST + GraphQL threads) and commits load concurrently
+            // with the diff instead of after it.
             async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
             async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
             if let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr) {
@@ -136,19 +160,26 @@ final class AppModel: ObservableObject {
             } else {
                 files = try await github.fetchDiff(repoDir: repoDir, number: pr.number)
             }
-            comments = await commentsTask
-            commits = await commitsTask
-            currentHead = try? await processRunner.run(
-                "git", arguments: ["rev-parse", "HEAD"],
-                currentDirectory: Self.appSupportDir
-                    .appendingPathComponent("worktrees/\(repoName)-pr\(pr.number)")
-            ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Show the PR as soon as its diff exists. Waiting for the `gh`
+            // round-trips first left the window unchanged for well over a
+            // second after the click, with the diff already in hand.
             let data = sessionStore.load(repo: repoName, prNumber: pr.number)
                 ?? SessionData(pr: pr, repoDir: repoDir.path, viewedFiles: [], chat: [], findings: [], verdict: nil)
             session = ReviewSession(data: data)
             // Land on the PR overview; the user picks a file from the tree.
             session?.selectedFile = nil
             errorBanner = nil
+            openingPRNumber = nil
+
+            comments = await commentsTask
+            commits = await commitsTask
+            isLoadingDetails = false
+            currentHead = try? await processRunner.run(
+                "git", arguments: ["rev-parse", "HEAD"],
+                currentDirectory: Self.appSupportDir
+                    .appendingPathComponent("worktrees/\(repoName)-pr\(pr.number)")
+            ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch { errorBanner = "Failed to open PR #\(pr.number): \(error.localizedDescription)" }
     }
 
@@ -206,8 +237,16 @@ final class AppModel: ObservableObject {
     }
 
     private func loadComments(repoDir: URL, number: Int) async -> [ReviewComment] {
-        var loaded = (try? await github.fetchComments(repoDir: repoDir, number: number)) ?? []
-        if let threads = try? await github.fetchThreadInfo(repoDir: repoDir, number: number) {
+        guard let owner = await nameWithOwner(repoDir: repoDir) else {
+            return (try? await github.fetchComments(repoDir: repoDir, number: number)) ?? []
+        }
+        // The REST comments and the GraphQL thread states do not depend on
+        // each other; running them in sequence doubled the wait.
+        async let commentsTask = try? await github.fetchComments(repoDir: repoDir, number: number)
+        async let threadsTask = try? await github.fetchThreadInfo(
+            repoDir: repoDir, number: number, nameWithOwner: owner)
+        var loaded = await commentsTask ?? []
+        if let threads = await threadsTask {
             for i in loaded.indices {
                 if let info = threads[loaded[i].id] {
                     loaded[i].threadID = info.threadID
