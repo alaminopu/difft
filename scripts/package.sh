@@ -39,7 +39,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>Difft</string>
-    <key>CFBundleIdentifier</key><string>dev.baserow.difft</string>
+    <key>CFBundleIdentifier</key><string>dev.alaminopu.difft</string>
     <key>CFBundleName</key><string>Difft</string>
     <key>CFBundleDisplayName</key><string>Difft</string>
     <key>CFBundlePackageType</key><string>APPL</string>

@@ -136,7 +136,7 @@ private struct PRListView: View {
 }
 
 /// One node of the changed-files tree: either a folder (children != nil) or a
-/// file leaf. Single-child folder chains are compacted ("src/baserow/api").
+/// file leaf. Single-child folder chains are compacted ("src/app/api").
 struct FileTreeNode: Identifiable {
     let id: String        // full path prefix (folders) or file path (leaves)
     let name: String      // display name (possibly compacted "a/b/c")
