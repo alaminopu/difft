@@ -2,7 +2,7 @@
 
 A native macOS app for reviewing GitHub pull requests.
 
-Every changed file in full — not just the hunks — with changes highlighted inline and line numbers meeting at a draggable center gutter. Review comments anchored to their lines, the branch's commits, and the diff any single commit introduced.
+Three lines of context rarely tell you whether a change is correct. Difft shows every changed file end to end, with the review conversation anchored where it happened, the branch's commits, and the diff any single commit introduced.
 
 ![Side-by-side diff with word-level emphasis](docs/screenshots/diff.png)
 
