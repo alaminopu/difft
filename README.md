@@ -1,39 +1,65 @@
 # Difft
 
-A native macOS app for reviewing GitHub pull requests, with Claude built in.
+A native macOS app for reviewing GitHub pull requests.
 
-Difft shows every changed file in full — the whole file, changes highlighted inline, line numbers meeting at a draggable center gutter, the way JetBrains renders diffs. Review comments from GitHub appear as cards anchored to their lines, and Claude sits in a side panel where it can explain the diff, answer questions about a selection, run a full review, or drive a browser to verify the change actually works.
+Difft shows every changed file in full — not just the changed hunks. Changes are highlighted inline, line numbers meet at a draggable center gutter, and review comments appear as cards anchored to the exact line they belong to.
 
-![PR overview](docs/screenshots/overview.png)
+![Difft showing a side-by-side diff](docs/screenshots/screenshot.png)
 
-## What it does
+## Features
 
-**Diff viewer** — pure SwiftUI, no web view. Side-by-side or unified layout, full-file context with syntax highlighting (Highlightr, theme follows system appearance), word-level change emphasis, a change-overview rail for jumping between edits in long files, wrapping long lines, and a draggable split between old and new. Click a line to select it, drag or shift-click for a range, right-click to copy or ask Claude about it.
+### Diff viewer
 
-**PR navigation** — pull requests load through the `gh` CLI (no OAuth, no tokens to manage). Filter the list by title, number, or author. Opening a PR lands on an overview page with the description rendered as markdown and an **Explain diff** button. Changed files show as a collapsible tree with per-folder counts, viewed-checkboxes, and comment badges.
+Pure SwiftUI — no web view.
 
-**Review comments** — inline comments from GitHub render under the exact line they anchor to, threads and all, with fenced code blocks syntax-highlighted. Reply and resolve without leaving the app.
+- Side-by-side or unified layout
+- Full-file context, not just hunks
+- Syntax highlighting that follows system appearance
+- Word-level emphasis on what actually changed
+- A change-overview rail for jumping between edits in long files
+- Draggable split between the old and new sides
+- Click a line to select it, drag or shift-click for a range, right-click to copy
 
-![Full-file diff with comment badges](docs/screenshots/diff-comments.png)
+### Pull requests
 
-**Claude assistant** — three tools in the side panel, all running your local `claude` CLI inside a dedicated git worktree of the PR:
+PRs load through the `gh` CLI, so there is no OAuth flow and no tokens to manage.
 
-- **Chat** answers questions about the PR, with read-only file access so it can explore the code. Attach a line selection as context via right-click.
-- **Findings** runs a full review and lists what it found — severity, file and line, explanation. Click a finding to jump to that line in the diff.
-- **Verify** lets the agent start the app and drive a browser to check that the PR does what it claims, collecting screenshots as evidence. This mode runs the PR's code with permission checks disabled, so it is gated behind an explicit confirmation naming the PR — every run, no remembering.
+- Filter the list by title, number, or author
+- The overview page renders the PR description as markdown
+- Changed files show as a collapsible tree with per-folder counts
+- Viewed checkboxes and comment badges on each file
 
-<img src="docs/screenshots/assistant.png" width="420" alt="Claude explaining a PR">
+### Review comments
 
-**Reports** — one click writes a self-contained HTML file (findings, Q&A transcript, verification evidence, review status, the full diff) to `~/Documents/Difft-reports/` and opens it in the browser. No external resources, safe to share.
+Inline comments from GitHub render under the line they anchor to, threads and all, with code blocks syntax-highlighted. Reply and resolve without leaving the app.
+
+### Assistant
+
+A side panel with three tools, each running inside a dedicated git worktree of the PR:
+
+| Tool | What it does |
+| --- | --- |
+| **Chat** | Answers questions about the PR, with read-only access to the code. Attach a line selection as context by right-clicking it. |
+| **Findings** | Runs a full review and lists what it found — severity, file, line, explanation. Click a finding to jump to that line in the diff. |
+| **Verify** | Starts the app and drives a browser to check that the PR does what it claims, collecting screenshots as evidence. |
+
+Chat and Findings are read-only. They can look at anything and change nothing.
+
+Verify is the exception: it runs the PR's code with permission checks disabled, so it is gated behind an explicit confirmation that names the PR — every run, no remembering.
+
+Cancel any run from the panel. The subprocess is terminated and state returns to idle.
+
+### Reports
+
+One click writes a self-contained HTML file to `~/Documents/Difft-reports/` and opens it in your browser. It holds the findings, the question-and-answer transcript, verification evidence, review status, and the full diff. No external resources, so it is safe to share.
 
 ## Requirements
 
-- macOS 14+
-- [`gh`](https://cli.github.com) — installed and authenticated (`gh auth status`)
-- [`claude`](https://docs.anthropic.com/en/docs/claude-code) — the Claude Code CLI
+- macOS 14 or later
+- [`gh`](https://cli.github.com), installed and authenticated — check with `gh auth status`
 - A local clone of the repository whose PRs you want to review
 
-The app checks all three at launch and tells you what's missing.
+Difft checks these at launch and tells you what is missing.
 
 ## Install
 
@@ -44,19 +70,22 @@ scripts/package.sh
 cp -R dist/Difft.app /Applications/
 ```
 
-Point it at your repo clone with the folder button in the sidebar, and pick a PR.
+Open the app, point it at your repo clone with the folder button in the sidebar, and pick a PR.
 
 ## Development
 
-Swift Package, four targets: `DifftCore` (diff model, parser, pairing, selection — pure logic, fully tested), `DifftServices` (gh/git/claude subprocesses, sessions, report builder), `DifftUI` (the diff renderer), `Difft` (the app).
+Difft is a Swift package with four targets:
+
+| Target | Contents |
+| --- | --- |
+| `DifftCore` | Diff model, parser, row pairing, selection — pure logic, fully tested |
+| `DifftServices` | Subprocesses, sessions, report builder |
+| `DifftUI` | The diff renderer |
+| `Difft` | The app |
 
 ```sh
-swift test        # 74 tests, no network or CLI needed — subprocesses are faked
+swift test        # 78 tests — no network or CLI needed, subprocesses are faked
 swift run Difft   # dev build
 ```
 
-Sessions (viewed files, chat, findings, verdicts) persist in `~/Library/Application Support/Difft/`, worktrees under the same directory, and survive relaunches.
-
-## How the agent runs
-
-Chat and review invoke `claude -p` with a read-only tool allowlist (`Read`, `Grep`, `Glob`) inside the PR's worktree — the agent can look at anything, change nothing. Verification is the only mode with full tool access, which is why it demands a per-run confirmation that spells out what you're agreeing to. Cancel any run from the panel; the subprocess gets terminated, state returns to idle.
+State lives in `~/Library/Application Support/Difft/` — viewed files, chat history, findings, verdicts, and the PR worktrees. All of it survives relaunches.
