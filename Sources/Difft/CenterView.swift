@@ -20,8 +20,27 @@ struct CenterView: View {
     }
 }
 
-/// Slim header above an open file's diff: name, directory, counts, and a
-/// close button back to the PR overview.
+/// The way back to the PR overview, in the leading position of every
+/// centre-pane header. A bare xmark on the trailing edge read as "dismiss"
+/// rather than "go up a level", so it says where it goes.
+struct OverviewBackButton: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Button {
+            model.showOverview()
+        } label: {
+            Label("Overview", systemImage: "chevron.left").font(.callout)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.accentColor)
+        .help("Back to the pull request overview (\u{2318}0)")
+        .accessibilityLabel("Back to pull request overview")
+    }
+}
+
+/// Slim header above an open file's diff: name, directory, counts, and the
+/// way back to the PR overview.
 struct FileHeaderBar: View {
     let file: FileDiff
     var isRefreshing: Bool = false
@@ -32,6 +51,8 @@ struct FileHeaderBar: View {
         let name = String(file.path.split(separator: "/").last ?? "")
         let dir = file.path.split(separator: "/").dropLast().joined(separator: "/")
         HStack(spacing: 8) {
+            OverviewBackButton()
+            Divider().frame(height: 14)
             Image(systemName: "doc.text")
                 .foregroundStyle(.secondary)
                 .imageScale(.small)
@@ -59,15 +80,6 @@ struct FileHeaderBar: View {
             .disabled(isRefreshing)
             .help("Fetch new commits and reload comments (⌘R)")
             .accessibilityLabel("Refresh pull request")
-            Button {
-                onClose()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Back to PR overview")
-            .accessibilityLabel("Close file")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -415,6 +427,7 @@ struct CommentsButton: View {
         let threads = CommentThread.group(model.comments)
         let unresolved = threads.count { !$0.resolved }
         Button {
+            model.closeCommit()
             session.showCommits = false
             session.showComments = true
         } label: {

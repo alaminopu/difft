@@ -45,18 +45,23 @@ struct PRCommitsView: View {
                 ContentUnavailableView("No commits",
                                        systemImage: "arrow.triangle.branch",
                                        description: Text("This pull request has no commits to show."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if visibleCommits.isEmpty {
                 ContentUnavailableView("Nothing matches",
                                        systemImage: "line.3.horizontal.decrease.circle",
                                        description: Text("No commit matches the current search."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 list
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
         HStack(spacing: 10) {
+            OverviewBackButton()
+            Divider().frame(height: 14)
             Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
             Text("Commits").font(.headline)
             Text(verbatim: "\(model.commits.count)")
@@ -93,14 +98,6 @@ struct PRCommitsView: View {
             .disabled(model.isRefreshing)
             .help("Fetch new commits and reload comments (⌘R)")
             .accessibilityLabel("Refresh pull request")
-            Button {
-                session.showCommits = false
-            } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Back to PR overview")
-            .accessibilityLabel("Close commits")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

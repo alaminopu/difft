@@ -175,6 +175,16 @@ final class AppModel: ObservableObject {
         errorBanner = nil
     }
 
+    /// Returns the centre pane to the PR overview from wherever it is. Every
+    /// way back routes through here so no caller can reset three of the four
+    /// pieces of state and leave the fourth behind.
+    func showOverview() {
+        session?.selectedFile = nil
+        session?.showComments = false
+        session?.showCommits = false
+        closeCommit()
+    }
+
     func closeCommit() {
         session?.selectedCommit = nil
         session?.selectedCommitFile = nil

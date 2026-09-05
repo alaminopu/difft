@@ -218,12 +218,30 @@ struct FileTreeView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            Text(verbatim: "#\(String(session.data.pr.number)) \(session.data.pr.title)")
+            let onOverview = session.selectedFile == nil
+                && !session.showComments && !session.showCommits
+            Button {
+                model.showOverview()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "doc.text.magnifyingglass").imageScale(.small)
+                    Text(verbatim: "#\(String(session.data.pr.number)) \(session.data.pr.title)")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
                 .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .foregroundStyle(onOverview ? Color.accentColor : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
+                .background(onOverview ? Color.accentColor.opacity(0.12) : .clear,
+                            in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 6)
+            .help("Back to the pull request overview (\u{2318}0)")
+            .accessibilityLabel("Pull request overview")
 
             ProgressView(value: Double(viewed.count), total: Double(max(model.files.count, 1)))
                 .controlSize(.small)

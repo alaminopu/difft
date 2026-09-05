@@ -41,15 +41,21 @@ struct CommitDiffView: View {
                 ContentUnavailableView("No changes to show",
                                        systemImage: "arrow.triangle.merge",
                                        description: Text("This commit introduces no diff of its own. Merge commits look like this."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 content
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
+                OverviewBackButton()
+                Divider().frame(height: 14)
+                // Two levels up from here, so both rungs are offered rather
+                // than making the overview a two-step trip.
                 Button {
                     model.closeCommit()
                 } label: {
@@ -117,6 +123,7 @@ struct CommitDiffView: View {
                     .onChange(of: file.path) { selection = nil }
             } else {
                 ContentUnavailableView("Pick a file", systemImage: "doc.text")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .toolbar {

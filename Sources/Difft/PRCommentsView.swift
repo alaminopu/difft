@@ -60,20 +60,25 @@ struct PRCommentsView: View {
                 ContentUnavailableView("No review comments",
                                        systemImage: "bubble.left.and.bubble.right",
                                        description: Text("Nobody has commented on this pull request yet."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if visibleThreads.isEmpty {
                 ContentUnavailableView("Nothing matches",
                                        systemImage: "line.3.horizontal.decrease.circle",
                                        description: Text("No comment matches the current filter or search."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 list
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
         let unresolved = threads.count { !$0.resolved }
         return VStack(spacing: 8) {
             HStack(spacing: 10) {
+                OverviewBackButton()
+                Divider().frame(height: 14)
                 Image(systemName: "bubble.left.and.bubble.right")
                     .foregroundStyle(.secondary)
                 Text("Review comments").font(.headline)
@@ -99,14 +104,6 @@ struct PRCommentsView: View {
                 .disabled(model.isRefreshing)
                 .help("Fetch new commits and reload comments (⌘R)")
                 .accessibilityLabel("Refresh pull request")
-                Button {
-                    session.showComments = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Back to PR overview")
-                .accessibilityLabel("Close comments")
             }
             HStack(spacing: 10) {
                 Picker("Filter", selection: $filter) {

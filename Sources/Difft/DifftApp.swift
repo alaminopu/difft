@@ -79,10 +79,7 @@ struct DifftCommands: Commands {
             .disabled(model.session == nil)
 
             Button("Back to Pull Request Overview") {
-                model.session?.showComments = false
-                model.session?.showCommits = false
-                model.session?.selectedFile = nil
-                model.closeCommit()
+                model.showOverview()
             }
             .keyboardShortcut("0", modifiers: .command)
             .disabled(model.session == nil)
