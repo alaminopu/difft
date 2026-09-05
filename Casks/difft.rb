@@ -7,18 +7,14 @@ cask "difft" do
   desc "Native macOS app for reviewing GitHub pull requests"
   homepage "https://github.com/alaminopu/difft"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "Difft.app"
 
-  # Difft is ad-hoc signed rather than notarized, so Gatekeeper would refuse
-  # to open it after a download. Homebrew clears the quarantine flag itself
-  # when a cask declares the app is unsigned.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Difft.app"],
-                   sudo: false
-  end
+  # Difft is ad-hoc signed rather than notarized, so macOS quarantines it and
+  # Gatekeeper refuses to open it. Install with --no-quarantine. A cask that
+  # cleared the flag itself would be defeating Gatekeeper on the user's behalf
+  # without them asking.
 
   zap trash: [
     "~/Library/Application Support/Difft",

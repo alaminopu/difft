@@ -10,14 +10,14 @@ Every changed file in full — not just the hunks — with changes highlighted i
 
 ```sh
 brew tap alaminopu/difft https://github.com/alaminopu/difft
+brew trust --cask alaminopu/difft/difft
 brew install --cask difft
-```
-
-Or [download the latest release](https://github.com/alaminopu/difft/releases/latest) and drag it to Applications. Difft is ad-hoc signed rather than notarized, so macOS quarantines a downloaded copy; the cask clears that for you, a manual download needs:
-
-```sh
 xattr -dr com.apple.quarantine /Applications/Difft.app
 ```
+
+Or [download the latest release](https://github.com/alaminopu/difft/releases/latest) and drag it to Applications, then run that last line.
+
+Difft is ad-hoc signed rather than notarized, so macOS quarantines it however you get it and Gatekeeper refuses to open it until that flag is cleared. Homebrew requires `brew trust` for third-party casks and no longer offers `--no-quarantine`, so both steps are explicit.
 
 **Requires** macOS 14+, [`gh`](https://cli.github.com) authenticated, and a local clone of the repo you want to review. Difft checks at launch and says what is missing.
 
