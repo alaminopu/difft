@@ -64,7 +64,7 @@ Difft checks these at launch and tells you what is missing.
 ## Install
 
 ```sh
-git clone git@github.com:alamin-br/difft.git
+git clone git@github.com:alaminopu/difft.git
 cd difft
 scripts/package.sh
 cp -R dist/Difft.app /Applications/
