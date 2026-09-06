@@ -310,8 +310,7 @@ private struct FileTreeNodeView: View {
                         .foregroundStyle(isViewed ? .secondary :
                             (session.selectedFile == file.path ? Color.accentColor : .primary))
                     Spacer(minLength: 4)
-                    let commentCount = CommentThread
-                        .group(model.comments.filter { $0.path == file.path }).count
+                    let commentCount = model.threadCountsByPath[file.path] ?? 0
                     if commentCount > 0 {
                         Button {
                             session.commentsScrollTarget = file.path

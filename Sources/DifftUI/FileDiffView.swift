@@ -59,6 +59,10 @@ public struct FileDiffView: View {
     /// only ever read inside the drag gesture, where a re-render buys nothing.
     @State private var rowFrames = RowFrameStore()
     @State private var dragAnchorRow: Int?
+    /// Trailing strip the macOS scroller floats in. Drag-to-select ignores it
+    /// so grabbing the thumb doesn't also sweep a selection. Legacy scrollers
+    /// are 15pt and overlay ones narrower; 16 covers both.
+    private static let scrollerWidth: CGFloat = 16
     /// Line range a new comment is being written against, nil when not
     /// composing.
     @State private var composing: CommentTarget?
@@ -173,7 +177,12 @@ public struct FileDiffView: View {
                 let widths = columnWidths(paneWidth: geo.size.width)
                 let leftW = widths.left
                 let rightW = widths.right
+                // Width the scroll view actually gets. The rail is always
+                // reserved, present or not, so switching files doesn't shift
+                // the columns sideways.
+                let contentW = geo.size.width - DiffMetrics.railWidth
                 ScrollViewReader { proxy in
+                  HStack(spacing: 0) {
                     ScrollView(.vertical) {
                         let language = HighlightService.language(forPath: file.path)
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -209,7 +218,7 @@ public struct FileDiffView: View {
                                 }
                             }
                         }
-                        .frame(width: geo.size.width, alignment: .leading)
+                        .frame(width: contentW, alignment: .leading)
                         .onPreferenceChange(RowFramesKey.self) { frames in rowFrames.frames = frames }
                     }
                     .coordinateSpace(name: "diffSpace")
@@ -219,6 +228,11 @@ public struct FileDiffView: View {
                     .simultaneousGesture(
                         DragGesture(minimumDistance: 6, coordinateSpace: .named("diffSpace"))
                             .onChanged { value in
+                                // The scroller floats over the scroll view's
+                                // own trailing edge. Recognising a drag there
+                                // meant dragging the thumb also swept a line
+                                // selection, and the churn made it stutter.
+                                guard value.startLocation.x < contentW - Self.scrollerWidth else { return }
                                 if dragAnchorRow == nil {
                                     dragAnchorRow = rowID(atY: value.startLocation.y)
                                 }
@@ -228,16 +242,29 @@ public struct FileDiffView: View {
                             }
                             .onEnded { _ in dragAnchorRow = nil }
                     )
-                    .overlay(alignment: .trailing) {
+                    // Beside the scroll view, never over it: as a trailing
+                    // overlay the rail sat exactly on top of the macOS
+                    // scroller and swallowed every mouse-down aimed at the
+                    // thumb, so the bar couldn't be dragged at all.
+                    Group {
                         // No rail when changes blanket the file (e.g. a fully
                         // added file) — a wall-to-wall tick navigates nothing.
                         if !built.changeBlocks.isEmpty,
                            built.changeBlocks.reduce(0, { $0 + $1.extent }) < 0.9 {
                             ChangeRailView(blocks: built.changeBlocks) { rowID in
-                                withAnimation { proxy.scrollTo("r\(rowID)", anchor: .center) }
+                                // Unanimated: animating a jump across a lazy
+                                // 10k-row list realises everything in between.
+                                proxy.scrollTo("r\(rowID)", anchor: .center)
+                            } onScrub: { ratio in
+                                guard !built.allRows.isEmpty else { return }
+                                let last = built.allRows.count - 1
+                                let idx = min(last, max(0, Int(ratio * CGFloat(built.allRows.count))))
+                                proxy.scrollTo("r\(built.allRows[idx].id)", anchor: .top)
                             }
                         }
                     }
+                    .frame(width: DiffMetrics.railWidth)
+                  }
                     // Rows build asynchronously: applying focus on appear ran
                     // against an empty row set and silently did nothing. Apply
                     // it whenever the built rows (or the target) change.
@@ -255,7 +282,11 @@ public struct FileDiffView: View {
                     if layout == .sideBySide, let leftW = leftW {
                         // Anchored to the REAL divider x (left gutter + left column),
                         // which differs from paneWidth*split when widths clamp.
-                        SplitHandle(split: $split, paneWidth: geo.size.width,
+                        // contentW, not geo.size.width: the columns are laid
+                        // out in the space left after the rail, so mapping the
+                        // drag against the full pane left the divider trailing
+                        // the pointer by the rail's width.
+                        SplitHandle(split: $split, paneWidth: contentW,
                                     dividerX: leftW + metrics.totalGutter + 0.5)
                     }
                 }
@@ -653,7 +684,15 @@ struct ChangeBlock: Equatable {
 /// whole file; clicking one jumps the diff there.
 struct ChangeRailView: View {
     let blocks: [ChangeBlock]
+    /// Click a tick: jump to that block of changes.
     let onJump: (Int) -> Void
+    /// Drag the rail: scrub to that fraction of the file, continuously.
+    let onScrub: (CGFloat) -> Void
+
+    /// Distinguishes a click from a drag. A click that has not moved snaps to
+    /// the nearest tick; once it moves it becomes a free scrub, so the rail
+    /// works like a scrollbar rather than only teleporting between changes.
+    @State private var scrubbing = false
 
     var body: some View {
         GeometryReader { geo in
@@ -667,17 +706,32 @@ struct ChangeRailView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { location in
-                let ratio = location.y / max(geo.size.height, 1)
-                if let nearest = blocks.min(by: {
-                    abs($0.fraction + $0.extent / 2 - ratio) < abs($1.fraction + $1.extent / 2 - ratio)
-                }) {
-                    onJump(nearest.rowID)
-                }
-            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard scrubbing || abs(value.translation.height) > 2 else { return }
+                        scrubbing = true
+                        onScrub(ratio(value.location.y, in: geo.size.height))
+                    }
+                    .onEnded { value in
+                        let r = ratio(value.location.y, in: geo.size.height)
+                        if scrubbing {
+                            onScrub(r)
+                        } else if let nearest = blocks.min(by: {
+                            abs($0.fraction + $0.extent / 2 - r) < abs($1.fraction + $1.extent / 2 - r)
+                        }) {
+                            onJump(nearest.rowID)
+                        }
+                        scrubbing = false
+                    }
+            )
         }
-        .frame(width: 12)
+        .frame(width: DiffMetrics.railWidth)
         .accessibilityLabel("Change overview")
+    }
+
+    private func ratio(_ y: CGFloat, in height: CGFloat) -> CGFloat {
+        min(max(y / max(height, 1), 0), 1)
     }
 }
 

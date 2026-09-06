@@ -17,7 +17,22 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var fileTree: [FileTreeNode] = []
 
-    @Published var comments: [ReviewComment] = []
+    /// Grouped per path rather than globally, so the counts match what the
+    /// per-file comment view shows.
+    private static func threadCounts(_ comments: [ReviewComment]) -> [String: Int] {
+        var byPath: [String: [ReviewComment]] = [:]
+        for comment in comments { byPath[comment.path, default: []].append(comment) }
+        return byPath.mapValues { CommentThread.group($0).count }
+    }
+    @Published var comments: [ReviewComment] = [] {
+        // Every file row in the sidebar used to filter the whole comment list
+        // and group it, inside its own body — O(files x comments) on each
+        // pass, paid again for every row the tree scrolled into view. Bucket
+        // it once here instead.
+        didSet { threadCountsByPath = Self.threadCounts(comments) }
+    }
+    /// Review-thread count per file path, for the sidebar's badge.
+    @Published private(set) var threadCountsByPath: [String: Int] = [:]
     @Published var commits: [Commit] = []
     /// The PR being opened, so the list and centre pane can say so. Opening
     /// waits on `gh`, and without this the app looked frozen on click.
