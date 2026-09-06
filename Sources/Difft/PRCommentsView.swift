@@ -192,7 +192,7 @@ struct PRCommentsView: View {
     private func open(_ thread: CommentThread) {
         session.selectedLines = thread.line.map { $0...$0 }
         session.selectedFile = thread.path
-        session.showComments = false
+        session.pane = .diff
     }
 }
 

@@ -7,17 +7,6 @@ struct RightPanel: View {
     @Binding var pendingAsk: (text: String, chip: String)?
     @Binding var tab: Int
 
-    private func consumeExplain(_ controller: AgentController) {
-        guard model.pendingExplainDiff else { return }
-        model.pendingExplainDiff = false
-        tab = 0
-        Task {
-            await controller.ask(
-                question: "Explain this PR: summarize what it changes and why, then walk through the key changes file by file. Keep it concise.",
-                selection: nil)
-        }
-    }
-
     var body: some View {
         let controller = model.agent
         VStack(spacing: 0) {
@@ -52,9 +41,7 @@ struct RightPanel: View {
             // A session restored onto the removed index would show Findings
             // while no tool-strip icon looked selected.
             if tab > 1 { tab = 1 }
-            consumeExplain(controller)
         }
-        .onChange(of: model.pendingExplainDiff) { consumeExplain(controller) }
         .onReceive(NotificationCenter.default.publisher(for: .difftCancelAgent)) { _ in model.agent.cancel() }
     }
 }
@@ -72,6 +59,12 @@ struct ChatTab: View {
     @Binding var pendingAsk: (text: String, chip: String)?
     @State private var question = ""
 
+    /// Runs whose result is appended to `session.data.chat`, and so whose
+    /// progress belongs in this transcript.
+    static func streamsHere(_ label: String?) -> Bool {
+        label == "Clarifying" || label == "Fixing"
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
@@ -88,7 +81,12 @@ struct ChatTab: View {
                     }
                     .frame(maxWidth: .infinity, alignment: msg.role == "user" ? .trailing : .leading)
                 }
-                if case .running = session.agentState, !controller.streamingText.isEmpty {
+                // Only for runs that end up in this transcript. Reviewing and
+                // Explaining answer into their own panes, and their narration
+                // showing here read as the explanation being posted to chat.
+                if case .running = session.agentState,
+                   ChatTab.streamsHere(controller.lastRunLabel),
+                   !controller.streamingText.isEmpty {
                     Text(controller.streamingText).padding(8).foregroundStyle(.secondary)
                 }
             }.padding(8)

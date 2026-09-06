@@ -145,15 +145,13 @@ struct PROverviewView: View {
                     .help("Fetch new commits and reload comments (⌘R)")
                     .accessibilityLabel("Refresh pull request")
                     Button {
-                        panelTab = 0
-                        showRightPanel = true
-                        model.pendingExplainDiff = true
+                        Task { await model.explainDiff() }
                     } label: {
                         Label("Explain diff", systemImage: "sparkles")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!session.agentState.canStart)
-                    .help("Ask Claude to summarize and explain this PR's changes")
+                    .disabled(!session.agentState.canStart && session.data.explanation == nil)
+                    .help("Open the PR walkthrough (\u{21E7}\u{2318}E)")
                 }
                 .font(.callout)
                 Divider()
@@ -180,15 +178,24 @@ struct FileDiffContainer: View {
     var onAsk: (String, String) -> Void
 
     var body: some View {
-        if session.showCommits {
+        switch session.pane {
+        case .commits:
             if let commit = session.selectedCommit {
                 CommitDiffView(session: session, commit: commit, onAsk: onAsk)
             } else {
                 PRCommitsView(session: session)
             }
-        } else if session.showComments {
+        case .comments:
             PRCommentsView(session: session)
-        } else if let path = session.selectedFile,
+        case .explain:
+            ExplainView(session: session, controller: model.agent)
+        case .diff:
+            diffOrOverview
+        }
+    }
+
+    @ViewBuilder private var diffOrOverview: some View {
+        if let path = session.selectedFile,
            let file = model.files.first(where: { $0.path == path }) {
             VStack(spacing: 0) {
                 FileHeaderBar(file: file,
@@ -436,8 +443,7 @@ struct CommentsButton: View {
             let unresolved = threads.count { !$0.resolved }
             Button {
                 model.closeCommit()
-                session.showCommits = false
-                session.showComments = true
+                session.pane = .comments
             } label: {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: "bubble.left.and.bubble.right")
@@ -469,10 +475,9 @@ struct CommitsButton: View {
             ProgressView().controlSize(.small)
         } else {
             Button {
-                session.showComments = false
                 // Land on the list, not on whichever commit was open last.
                 model.closeCommit()
-                session.showCommits = true
+                session.pane = .commits
             } label: {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: "arrow.triangle.branch")

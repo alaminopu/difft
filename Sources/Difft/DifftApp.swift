@@ -63,16 +63,20 @@ struct DifftCommands: Commands {
         CommandGroup(after: .sidebar) {
             Divider()
             Button("All Review Comments") {
-                model.session?.showCommits = false
-                model.session?.showComments = true
+                model.session?.pane = .comments
             }
             .keyboardShortcut("c", modifiers: [.command, .shift])
             .disabled(model.session == nil)
 
+            Button("Explain Diff") {
+                Task { await model.explainDiff() }
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .disabled(model.session == nil)
+
             Button("All Commits") {
-                model.session?.showComments = false
                 model.closeCommit()
-                model.session?.showCommits = true
+                model.session?.pane = .commits
             }
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(model.session == nil)

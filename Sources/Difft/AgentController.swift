@@ -84,6 +84,33 @@ final class AgentController: ObservableObject {
         }
     }
 
+    /// Walks the reviewer through the PR. Answers into `session.data
+    /// .explanation` for the Explain pane to render — deliberately not into
+    /// chat, where a structured walkthrough became an unscannable wall of
+    /// text that scrolled away behind the next question.
+    func runExplain() async {
+        guard let session = model.session else { return }
+        let summary = model.files.map { "\($0.path) (+\($0.additions)/−\($0.deletions))" }
+            .joined(separator: "\n")
+        let task = AgentTask.explain(pr: session.data.pr, diffSummary: summary)
+        await withWorktree("Explaining") { wt in
+            var final = ""
+            for try await event in agent.run(task, in: wt) {
+                self.consume(event, accumulatingResult: &final)
+            }
+            guard let parsed = ExplanationParser.parse(final.isEmpty ? self.streamingText : final) else {
+                // A run that produced nothing decodable must not blank out a
+                // good explanation from a previous run.
+                session.agentState = .failed("Explaining: no walkthrough came back")
+                return
+            }
+            let head = try? await self.model.processRunner.run(
+                "git", arguments: ["rev-parse", "HEAD"], currentDirectory: wt)
+            let sha = head?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            session.data.explanation = parsed.stamped(headSHA: (sha?.isEmpty ?? true) ? nil : sha)
+        }
+    }
+
     /// Asks Claude to fix one finding in the PR worktree, then reports the
     /// resulting patch in chat. Edits stay in the worktree — never the user's
     /// clone — and nothing is committed.

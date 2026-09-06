@@ -227,8 +227,7 @@ struct FileTreeView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            let onOverview = session.selectedFile == nil
-                && !session.showComments && !session.showCommits
+            let onOverview = session.pane == .diff && session.selectedFile == nil
             Button {
                 model.showOverview()
             } label: {
@@ -293,8 +292,7 @@ private struct FileTreeNodeView: View {
         } else if let file = node.file {
             let isViewed = session.data.viewedFiles.contains(file.path)
             Button {
-                session.showComments = false
-                session.showCommits = false
+                session.pane = .diff
                 model.closeCommit()
                 session.selectedFile = file.path
             } label: {
@@ -314,8 +312,7 @@ private struct FileTreeNodeView: View {
                     if commentCount > 0 {
                         Button {
                             session.commentsScrollTarget = file.path
-                            session.showCommits = false
-                            session.showComments = true
+                            session.pane = .comments
                         } label: {
                             Label("\(commentCount)", systemImage: "bubble.left")
                                 .font(.caption.monospacedDigit())

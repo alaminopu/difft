@@ -53,7 +53,6 @@ final class AppModel: ObservableObject {
     @Published var toolCheck: (gh: Bool, ghAuth: Bool, claude: Bool)?
     @Published var errorBanner: String?
     /// Set by the overview's Explain button; consumed by the assistant panel.
-    @Published var pendingExplainDiff = false
     @Published var isRefreshing = false
     /// Short transient result of the last refresh, shown in the overview.
     @Published var refreshNote: String?
@@ -242,10 +241,23 @@ final class AppModel: ObservableObject {
     /// Returns the centre pane to the PR overview from wherever it is. Every
     /// way back routes through here so no caller can reset three of the four
     /// pieces of state and leave the fourth behind.
+    /// Opens the Explain pane, running the walkthrough if there isn't one.
+    ///
+    /// `force` re-runs against the current head; without it an existing
+    /// explanation is shown as-is, so returning to the pane is instant and
+    /// does not spend an agent run.
+    func explainDiff(force: Bool = false) async {
+        guard let session else { return }
+        session.pane = .explain
+        closeCommit()
+        guard force || session.data.explanation == nil else { return }
+        guard session.agentState.canStart else { return }
+        await agent.runExplain()
+    }
+
     func showOverview() {
         session?.selectedFile = nil
-        session?.showComments = false
-        session?.showCommits = false
+        session?.pane = .diff
         closeCommit()
     }
 
@@ -260,8 +272,7 @@ final class AppModel: ObservableObject {
         guard let session else { return }
 
         if let known = commits.first(where: { $0.sha.hasPrefix(sha) }) {
-            session.showComments = false
-            session.showCommits = true
+            session.pane = .commits
             await openCommit(known)
             return
         }
@@ -279,8 +290,7 @@ final class AppModel: ObservableObject {
                 let resolved = Commit(sha: parts[0], subject: parts[3],
                                       body: parts.count > 4 ? parts[4] : "",
                                       author: parts[1], date: parts[2])
-                session.showComments = false
-                session.showCommits = true
+                session.pane = .commits
                 await openCommit(resolved)
                 return
             }

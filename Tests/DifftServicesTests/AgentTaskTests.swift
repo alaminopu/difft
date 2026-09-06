@@ -46,4 +46,27 @@ final class AgentTaskTests: XCTestCase {
         XCTAssertFalse(args.joined().contains("Bash"))
         XCTAssertFalse(args.contains("--dangerously-skip-permissions"))
     }
+
+    /// The explain task's whole value is that it does not recite the diff
+    /// file by file and does not answer in prose.
+    func testExplainPromptAsksForGroupedJSON() {
+        let task = AgentTask.explain(pr: pr, diffSummary: "a.swift (+3/−1)")
+        XCTAssertTrue(task.prompt.contains("Add login"))
+        XCTAssertTrue(task.prompt.contains("a.swift (+3/−1)"))
+        XCTAssertTrue(task.prompt.contains("```json"))
+        XCTAssertTrue(task.prompt.contains("outOfScope"))
+        XCTAssertTrue(task.prompt.contains("BEHAVIOUR or CONCERN"),
+                      "must group by behaviour, not by file")
+        // The reviewer-lineage ideas the skill survey converged on.
+        XCTAssertTrue(task.prompt.contains("load-bearing"))
+        XCTAssertTrue(task.prompt.contains("mechanical"))
+        XCTAssertTrue(task.prompt.contains("motivationInferred"))
+        XCTAssertTrue(task.prompt.contains("readFirst"))
+        XCTAssertTrue(task.prompt.contains("not a code review"),
+                      "must not duplicate the Findings reviewer")
+        // Read-only, like clarify and review — explaining never edits or runs.
+        XCTAssertTrue(task.cliArguments.contains("Read,Grep,Glob"))
+        XCTAssertFalse(task.cliArguments.contains("--dangerously-skip-permissions"))
+    }
+
 }

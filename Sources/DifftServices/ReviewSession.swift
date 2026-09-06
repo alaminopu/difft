@@ -25,9 +25,13 @@ public struct SessionData: Codable, Equatable, Sendable {
     public var viewedFiles: Set<String>
     public var chat: [ChatMessage]
     public var findings: [Finding]
-    public init(pr: PullRequest, repoDir: String, viewedFiles: Set<String>, chat: [ChatMessage], findings: [Finding]) {
+    /// The PR walkthrough, kept so reopening a PR does not re-run the agent.
+    public var explanation: DiffExplanation?
+    public init(pr: PullRequest, repoDir: String, viewedFiles: Set<String>,
+                chat: [ChatMessage], findings: [Finding],
+                explanation: DiffExplanation? = nil) {
         self.pr = pr; self.repoDir = repoDir; self.viewedFiles = viewedFiles
-        self.chat = chat; self.findings = findings
+        self.chat = chat; self.findings = findings; self.explanation = explanation
     }
 }
 
@@ -57,15 +61,22 @@ public enum AgentState: Equatable, Sendable {
     }
 }
 
+/// The centre pane's mode. `.diff` covers both the PR overview and an open
+/// file — which of those shows is decided by `selectedFile`.
+public enum CenterPane: String, Codable, Sendable {
+    case diff, comments, commits, explain
+}
+
 @MainActor
 public final class ReviewSession: ObservableObject {
     @Published public var data: SessionData
     @Published public var selectedFile: String?
     @Published public var selectedLines: ClosedRange<Int>?
-    /// Whether the centre pane shows every review comment instead of a diff.
-    @Published public var showComments = false
-    /// Whether the centre pane shows the PR's commits instead of a diff.
-    @Published public var showCommits = false
+    /// What the centre pane is showing. One value rather than a flag per
+    /// pane: as separate booleans every new pane had to remember to clear
+    /// every other one at eleven call sites, and a miss showed two panes'
+    /// state at once.
+    @Published public var pane: CenterPane = .diff
     /// Commit whose own diff is open, drilled into from the commits list.
     @Published public var selectedCommit: Commit?
     /// File selected within that commit's diff.

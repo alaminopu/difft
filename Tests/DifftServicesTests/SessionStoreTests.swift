@@ -36,4 +36,23 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path + ".bak"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
     }
+
+    /// Sessions written before the Explain pane existed have no `explanation`
+    /// key. They must still load, or upgrading silently loses every PR's
+    /// viewed-file and chat state.
+    func testLoadsASessionWrittenBeforeExplanationExisted() throws {
+        let legacy = """
+        {"pr":{"number":1166,"title":"Prepare Air 0.49.0","body":"B",
+        "headRefName":"agent/release-0.49.0","authorLogin":"a"},
+        "repoDir":"/tmp/repo","viewedFiles":["a.txt"],
+        "chat":[{"role":"user","text":"why?"}],"findings":[]}
+        """
+        let data = Data(legacy.utf8)
+        let decoded = try JSONDecoder().decode(SessionData.self, from: data)
+        XCTAssertEqual(decoded.pr.number, 1166)
+        XCTAssertEqual(decoded.viewedFiles, ["a.txt"])
+        XCTAssertEqual(decoded.chat.count, 1)
+        XCTAssertNil(decoded.explanation)
+    }
+
 }

@@ -45,6 +45,12 @@ Threads render under the line they belong to, markdown and code blocks intact. R
 
 ![Commits grouped by the day they were authored](docs/screenshots/commits.png)
 
+## Explain diff
+
+**⇧⌘E** opens a walkthrough of the PR in its own pane. Not a summary of the diff — you already have the diff. It answers what the change is *for*, groups it into a handful of areas by behaviour rather than reciting it file by file, and says where the risk sits.
+
+It separates the load-bearing changes from the mechanical bulk, marks whether the author's intent was *stated* or reconstructed from the code, and ends with a short comprehension gate — a few questions you should be able to answer before approving. Every file and line it names is a link into the diff. It runs read-only in the PR's worktree, and the result is kept with the session: reopening the PR shows it instantly, and it tells you when the branch has moved on since.
+
 ## Assistant
 
 A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** runs a review and lists what it found; click one to jump to the line.
@@ -62,6 +68,7 @@ Chat and Findings run read-only. Asking one to fix a finding lets it edit files,
 | | |
 | --- | --- |
 | `⇧⌘C` `⇧⌘K` | Comments · Commits |
+| `⇧⌘E` | Explain diff |
 | `⌘0` `⌘R` | Overview · Refresh |
 | `⌥⌘0` | Assistant panel |
 | `⌘,` `⌘↩` | Settings · Post comment |
