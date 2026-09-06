@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 VERSION="${1:?usage: scripts/release.sh <version>}"
 OUT="dist"
 
-scripts/package.sh "$OUT" >/dev/null
+scripts/package.sh "$OUT" "$VERSION" >/dev/null
 
 # ditto rather than zip: it preserves the bundle's symlinks and resource
 # forks, which a plain zip mangles enough to break the signature.

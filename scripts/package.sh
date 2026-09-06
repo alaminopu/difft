@@ -1,11 +1,14 @@
 #!/bin/bash
 # Package Difft as a standalone macOS app bundle.
-# Usage: scripts/package.sh [output-dir]   (default: ./dist)
+# Usage: scripts/package.sh [output-dir] [version]   (default: ./dist, 0.0.0-dev)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 OUT="${1:-dist}"
+# The bundle used to hardcode 1.0, so every release since 0.1.0 reported the
+# wrong version in About Difft and to anything reading the plist.
+VERSION="${2:-0.0.0-dev}"
 APP="$OUT/Difft.app"
 
 # Force a relink: SwiftPM sometimes rebuilds modules without relinking the
@@ -34,7 +37,7 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Difft.icns"
 rm -rf "$ICONSET"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,8 +48,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key><string>Difft</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>Difft</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string></string>
@@ -57,5 +60,5 @@ PLIST
 # Ad-hoc signature so Gatekeeper runs it locally without complaints.
 codesign --force --deep -s - "$APP"
 
-echo "Packaged: $APP"
+echo "Packaged: $APP ($VERSION)"
 echo "Install:  cp -R $APP /Applications/"

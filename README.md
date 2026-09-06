@@ -85,7 +85,7 @@ Chat and Findings run read-only. Asking one to fix a finding lets it edit files,
 ```sh
 swift test        # 170 tests, no network or CLI needed
 swift run Difft   # dev build
-scripts/release.sh 0.1.1
+scripts/release.sh 0.2.0
 ```
 
 Four targets: `DifftCore` (diff model and parsing, pure logic), `DifftServices` (subprocesses, sessions, reports), `DifftUI` (the renderer), `Difft` (the app).
