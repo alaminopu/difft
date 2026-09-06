@@ -134,13 +134,19 @@ struct RootView: View {
         // Keep the syntax palette in lockstep with the real appearance —
         // NSApp.effectiveAppearance lies during early launch.
         .environment(\.repoSlug, model.repoSlug)
-        // A commit SHA in a comment opens in the diff viewer. Every other
-        // link still goes to the browser, so this handles only our scheme
-        // and declines the rest.
+        // A commit SHA in a comment opens in the diff viewer.
+        //
+        // Everything else is handed to the system ONLY if it is a web link.
+        // PR descriptions and review comments are attacker-controlled markdown
+        // on a PR from a fork, and `.systemAction` on an arbitrary scheme is
+        // LaunchServices opening whatever is registered for it — file://,
+        // another app's custom scheme. Web links go out; the rest is inert.
         .environment(\.openURL, OpenURLAction { url in
-            guard let sha = CommitReference.sha(from: url) else { return .systemAction }
-            Task { await model.openCommit(sha: sha) }
-            return .handled
+            if let sha = CommitReference.sha(from: url) {
+                Task { await model.openCommit(sha: sha) }
+                return .handled
+            }
+            return DifftURLPolicy.allowsOpening(url) ? .systemAction : .discarded
         })
         .onAppear { syncHighlighter() }
         .onChange(of: colorScheme) { _, _ in highlighter.setDark(isDark) }

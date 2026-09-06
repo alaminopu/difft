@@ -69,4 +69,18 @@ final class AgentTaskTests: XCTestCase {
         XCTAssertFalse(task.cliArguments.contains("--dangerously-skip-permissions"))
     }
 
+
+    /// The checkout is the PR's own content, CLAUDE.md included — a diff can
+    /// add one in the same change being reviewed.
+    func testPromptsTreatRepoContentAsData() {
+        for task in [AgentTask.review(pr: pr, diffSummary: "a"),
+                     AgentTask.explain(pr: pr, diffSummary: "a"),
+                     AgentTask.verifyFindings(pr: pr, candidates: [])] {
+            let prompt = task.prompt.lowercased()
+            XCTAssertTrue(prompt.contains("data"),
+                          "every pass must frame PR content as data, not instructions")
+            XCTAssertTrue(prompt.contains("instructions"))
+        }
+    }
+
 }
