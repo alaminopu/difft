@@ -68,7 +68,8 @@ struct HalfLineView: View {
         if side == .unified {
             // One pre-formatted text: old and new numbers as fixed-width
             // fields, so both columns always align without nested layout.
-            let text = Self.unifiedGutterText(old: line?.oldNumber, new: line?.newNumber)
+            let text = Self.unifiedGutterText(old: line?.oldNumber, new: line?.newNumber,
+                                              digits: metrics.digits)
             Text(text)
                 .font(numberFont)
                 .foregroundStyle(.secondary)
@@ -89,10 +90,15 @@ struct HalfLineView: View {
         }
     }
 
-    static func unifiedGutterText(old: Int?, new: Int?) -> String {
+    /// Both numbers as fixed-width fields, padded to the file's own digit
+    /// count. It used to pad to a hardcoded 5 while `DiffMetrics` sized the
+    /// gutter for the real count, so on any file with fewer than 5-digit line
+    /// numbers — nearly all of them — the 11-character string overflowed the
+    /// narrower gutter and `lineLimit(1)` truncated the new-line column away.
+    static func unifiedGutterText(old: Int?, new: Int?, digits: Int) -> String {
         func pad(_ n: Int?) -> String {
             let s = n.map(String.init) ?? ""
-            return String(repeating: " ", count: max(0, 5 - s.count)) + s
+            return String(repeating: " ", count: max(0, digits - s.count)) + s
         }
         return pad(old) + " " + pad(new)
     }
@@ -182,12 +188,18 @@ struct DiffRowView: View {
         // easy to miss. Shift-click extends, like any list.
         .contentShape(Rectangle())
         .onTapGesture { select() }
+        // Both overlays stay out of hit testing. A `Color` overlay is
+        // hit-testable and layers above the tap gesture attached below it, so
+        // a selected row used to swallow its own clicks: you could select a
+        // row, but not click it again or shift-click to extend from inside
+        // the selection.
         .overlay {
-            if isSelected { Palette.selection }
+            if isSelected { Palette.selection.allowsHitTesting(false) }
         }
         .overlay(alignment: .leading) {
             if isSelected {
                 Rectangle().fill(Palette.selectionBar).frame(width: 2)
+                    .allowsHitTesting(false)
             }
         }
         .contextMenu {

@@ -61,8 +61,8 @@ public enum DiffParser {
                 flush(); inHunk = true; header = line
                 // "@@ -a,b +c,d @@ ..."
                 let nums = line.split(separator: " ").dropFirst().prefix(2)
-                if let o = nums.first { oldNo = Int(o.dropFirst().split(separator: ",")[0]) ?? 0 }
-                if let n = nums.dropFirst().first { newNo = Int(n.dropFirst().split(separator: ",")[0]) ?? 0 }
+                if let o = nums.first { oldNo = Self.hunkStart(o) }
+                if let n = nums.dropFirst().first { newNo = Self.hunkStart(n) }
             } else if inHunk {
                 if line.hasPrefix("+") {
                     current.append(DiffLine(kind: .addition, oldNumber: nil, newNumber: newNo, text: String(line.dropFirst())))
@@ -83,4 +83,14 @@ public enum DiffParser {
         flush()
         return hunks
     }
+
+    /// First line number in a hunk header field such as "-12,7" or "+12".
+    ///
+    /// Splitting on "," and taking `[0]` trapped on a field that is empty
+    /// after the sign ("@@ - +1 @@"), taking the whole app down for one
+    /// malformed header. Scanning the leading digits cannot trap.
+    static func hunkStart(_ field: Substring) -> Int {
+        Int(field.dropFirst().prefix { $0.isNumber }) ?? 0
+    }
+
 }

@@ -73,4 +73,27 @@ final class DiffParserTests: XCTestCase {
         XCTAssertEqual(withTrailingNewline, withoutTrailingNewline)
         XCTAssertEqual(withTrailingNewline[0].hunks[0].lines.count, 4)
     }
+
+    /// A hunk header whose range is empty after the sign used to trap on
+    /// `[0]` of an empty split, crashing the whole app on one bad line.
+    func testMalformedHunkHeaderDoesNotTrap() {
+        XCTAssertEqual(DiffParser.hunkStart("-"), 0)
+        XCTAssertEqual(DiffParser.hunkStart("-,"), 0)
+        XCTAssertEqual(DiffParser.hunkStart("+"), 0)
+        XCTAssertEqual(DiffParser.hunkStart("-12,7"), 12)
+        XCTAssertEqual(DiffParser.hunkStart("+12"), 12)
+        XCTAssertEqual(DiffParser.hunkStart("-0,0"), 0)
+
+        let patch = """
+        diff --git a/a.txt b/a.txt
+        --- a/a.txt
+        +++ b/a.txt
+        @@ - +1 @@
+        +hello
+        """
+        let files = DiffParser.parse(patch)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files.first?.hunks.first?.lines.count, 1)
+    }
+
 }

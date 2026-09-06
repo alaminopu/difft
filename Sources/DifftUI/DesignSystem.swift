@@ -134,6 +134,9 @@ public struct DiffMetrics: Equatable, Sendable {
 
     public let fontSize: CGFloat
     public let numberFontSize: CGFloat
+    /// Widest line number in the file, in digits. The gutter is sized for it
+    /// and the unified gutter pads to it, so the two cannot drift apart.
+    public let digits: Int
     public let gutterWidth: CGFloat
     public let codeInset: CGFloat = Spacing.sm - 2   // 6
     public let gutterTrailing: CGFloat = Spacing.sm  // 8
@@ -148,6 +151,7 @@ public struct DiffMetrics: Equatable, Sendable {
     public init(fontSize: CGFloat, digits: Int, unified: Bool) {
         self.fontSize = fontSize
         self.numberFontSize = fontSize - 1
+        self.digits = digits
         // Monospaced digit advance is ~0.6em; +2 keeps a digit from kissing
         // the separator at the largest sizes.
         let digitWidth = (fontSize - 1) * 0.62

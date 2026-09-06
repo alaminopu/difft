@@ -53,4 +53,33 @@ final class DiffMetricsTests: XCTestCase {
         XCTAssertLessThan(DiffMetrics.minFontSize, DiffMetrics.defaultFontSize)
         XCTAssertLessThan(DiffMetrics.defaultFontSize, DiffMetrics.maxFontSize)
     }
+
+    /// The unified gutter reserves room for `digits * 2 + 1` characters, so
+    /// the string it renders must never be longer than that. It used to pad
+    /// to a hardcoded 5 regardless, which overflowed every file whose line
+    /// numbers were shorter and truncated the new-line column away.
+    func testUnifiedGutterTextFitsTheReservedWidth() {
+        for digits in 2...7 {
+            let maxLine = Int(pow(10.0, Double(digits))) - 1
+            let text = HalfLineView.unifiedGutterText(old: maxLine, new: maxLine, digits: digits)
+            XCTAssertEqual(text.count, digits * 2 + 1,
+                           "digits=\(digits) must fit the width DiffMetrics reserves")
+        }
+    }
+
+    /// Fields stay column-aligned whatever each number's own width is.
+    func testUnifiedGutterTextRightAlignsBothFields() {
+        XCTAssertEqual(HalfLineView.unifiedGutterText(old: 7, new: 1234, digits: 4), "   7 1234")
+        XCTAssertEqual(HalfLineView.unifiedGutterText(old: nil, new: 42, digits: 4), "       42")
+        XCTAssertEqual(HalfLineView.unifiedGutterText(old: 42, new: nil, digits: 4), "  42     ")
+    }
+
+    /// A number wider than the file's digit count must not shift the field
+    /// beside it — the old padding silently allowed that.
+    func testUnifiedGutterTextWidthMatchesMetrics() {
+        let m = DiffMetrics(fontSize: 12, digits: 3, unified: true)
+        XCTAssertEqual(m.digits, 3)
+        let text = HalfLineView.unifiedGutterText(old: 999, new: 999, digits: m.digits)
+        XCTAssertEqual(text.count, m.digits * 2 + 1)
+    }
 }

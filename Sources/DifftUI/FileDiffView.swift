@@ -757,6 +757,9 @@ private struct SplitHandle: View {
     let dividerX: CGFloat
     @State private var hovering = false
     @State private var dragging = false
+    /// Mirrors what this view has actually pushed onto `NSCursor`'s global
+    /// stack, so every push is matched by exactly one pop. See `setCursor`.
+    @State private var pushedCursor = false
 
     var body: some View {
         GeometryReader { geo in
@@ -771,6 +774,17 @@ private struct SplitHandle: View {
             }
             .frame(width: 17, height: geo.size.height)
             .contentShape(Rectangle())
+            // Hover is tracked on the 17pt strip itself, BEFORE `.position`
+            // wraps it in a full-pane frame — attached after, it tracks that
+            // pane and the resize cursor appears across the whole diff.
+            .onHover { inside in setCursor(inside) }
+            .onDisappear {
+                // Switching to Unified, or to another file, removes this view
+                // while the pointer is still over it, so the exit event never
+                // arrives. Without this the pushed cursor sticks for the rest
+                // of the session and every view shows the resize arrows.
+                setCursor(false)
+            }
             .position(x: dividerX, y: geo.size.height / 2)
             .highPriorityGesture(
                 // `.position` wraps the strip in a full-pane frame, so the
@@ -783,12 +797,18 @@ private struct SplitHandle: View {
                     }
                     .onEnded { _ in dragging = false }
             )
-            .onHover { inside in
-                hovering = inside
-                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-            }
         }
-        .allowsHitTesting(true)
+    }
+
+    /// `NSCursor.push()`/`pop()` drive a global stack, so an unmatched push
+    /// changes the cursor everywhere until the app quits. SwiftUI re-sends
+    /// hover on layout and focus changes, so guard on our own state rather
+    /// than trusting the events to alternate.
+    private func setCursor(_ inside: Bool) {
+        guard inside != pushedCursor else { return }
+        pushedCursor = inside
+        hovering = inside
+        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
     }
 }
 
