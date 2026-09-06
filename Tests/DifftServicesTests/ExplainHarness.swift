@@ -25,4 +25,18 @@ final class ExplainHarnessTests: XCTestCase {
         for a in e.areas { print("  area: \(a.title) files=\(a.files.count) anchors=\(a.anchors.count)") }
         for a in e.areas.flatMap(\.anchors) { print("  anchor: \(a.file):\(a.line.map(String.init) ?? "-")") }
     }
+
+    /// Renders the review prompt at a given file count, so the reading budget
+    /// can be A/B'd against a real repository instead of asserted.
+    func testRenderReviewPromptWhenAsked() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let out = env["DIFFT_DUMP_REVIEW"] else { return }
+        let pr = PullRequest(number: Int(env["P_NUM"] ?? "1") ?? 1,
+                             title: env["P_TITLE"] ?? "", body: env["P_BODY"] ?? "",
+                             headRefName: env["P_HEAD"] ?? "main", authorLogin: env["P_AUTHOR"] ?? "")
+        let count = Int(env["P_COUNT"] ?? "1") ?? 1
+        let task = AgentTask.review(pr: pr, diffSummary: env["P_FILES"] ?? "", fileCount: count)
+        try Data(task.prompt.utf8).write(to: URL(fileURLWithPath: out))
+    }
+
 }
