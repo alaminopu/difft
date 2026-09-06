@@ -5,7 +5,11 @@ let package = Package(
     name: "Difft",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/raspu/Highlightr", from: "2.2.0"),
+        // Vendored rather than fetched: SwiftPM's generated Bundle.module
+        // cannot find resources inside a signed .app, so the app crashed at
+        // launch on every machine but the one that built it. See
+        // Vendor/Highlightr/PATCH.md.
+        .package(path: "Vendor/Highlightr"),
     ],
     targets: [
         .target(name: "DifftCore"),

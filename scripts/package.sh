@@ -17,8 +17,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/Difft "$APP/Contents/MacOS/Difft"
-# Highlightr's syntax themes: SPM's Bundle.module lookup checks the app's
-# Resources directory (codesign rejects loose bundles inside MacOS/).
+# Highlightr's syntax themes. The vendored copy looks here first — SwiftPM's
+# own Bundle.module cannot, and macOS will not sign a bundle with anything
+# loose at its root. See Vendor/Highlightr/PATCH.md.
 cp -R .build/release/Highlightr_Highlightr.bundle "$APP/Contents/Resources/"
 
 # App icon: rendered by scripts/make-icon.swift, packed into an .icns.
