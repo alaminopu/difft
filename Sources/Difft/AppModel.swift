@@ -255,6 +255,25 @@ final class AppModel: ObservableObject {
         await agent.runExplain()
     }
 
+    /// Opens the Review pane, running the review if there isn't one.
+    func review(force: Bool = false) async {
+        guard let session else { return }
+        session.pane = .review
+        closeCommit()
+        guard force || session.data.reviewStamp == nil else { return }
+        guard session.agentState.canStart else { return }
+        await agent.runReview()
+    }
+
+    /// Triage state lives on the finding and is saved with the session, so a
+    /// dismissal survives closing the PR.
+    func setFindingDismissed(_ finding: Finding, _ dismissed: Bool) {
+        guard let session else { return }
+        guard let i = session.data.findings.firstIndex(where: { $0.id == finding.id }) else { return }
+        session.data.findings[i].dismissed = dismissed
+        try? sessionStore.save(session.data)
+    }
+
     func showOverview() {
         session?.selectedFile = nil
         session?.pane = .diff

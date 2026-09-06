@@ -71,16 +71,46 @@ final class AgentController: ObservableObject {
         }
     }
 
+    /// Two passes: find, then try to disprove. The verifier runs without the
+    /// finder's reasoning in front of it, because a pass that can see why a
+    /// finding was raised tends to agree with it. Anything it does not return
+    /// is discarded — that filter is the whole point.
     func runReview() async {
         guard let session = model.session else { return }
         let summary = model.files.map { "\($0.path) (+\($0.additions)/−\($0.deletions))" }.joined(separator: "\n")
-        let task = AgentTask.review(pr: session.data.pr, diffSummary: summary)
         await withWorktree("Reviewing") { wt in
-            var final = ""
-            for try await event in agent.run(task, in: wt) {
-                self.consume(event, accumulatingResult: &final)
+            var found = ""
+            for try await event in agent.run(
+                    AgentTask.review(pr: session.data.pr, diffSummary: summary), in: wt) {
+                self.consume(event, accumulatingResult: &found)
             }
-            session.data.findings = FindingsParser.parse(final)
+            let candidates = FindingsParser.parse(found.isEmpty ? self.streamingText : found)
+            let head = try? await self.model.processRunner.run(
+                "git", arguments: ["rev-parse", "HEAD"], currentDirectory: wt)
+            let sha = head?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            let stampSHA = (sha?.isEmpty ?? true) ? nil : sha
+
+            guard !candidates.isEmpty else {
+                session.data.findings = []
+                session.data.reviewStamp = ReviewStamp(headSHA: stampSHA)
+                return
+            }
+
+            session.agentState = .running("Verifying")
+            self.lastRunLabel = "Verifying"
+            self.streamingText = ""; self.toolActivity = []
+            var checked = ""
+            for try await event in agent.run(
+                    AgentTask.verifyFindings(pr: session.data.pr, candidates: candidates), in: wt) {
+                self.consume(event, accumulatingResult: &checked)
+            }
+            let survivors = FindingsParser.parseVerified(checked.isEmpty ? self.streamingText : checked)
+            session.data.findings = survivors.sorted {
+                $0.severityRank == $1.severityRank ? $0.file < $1.file : $0.severityRank < $1.severityRank
+            }
+            session.data.reviewStamp = ReviewStamp(
+                headSHA: stampSHA,
+                discarded: max(0, candidates.count - survivors.count))
         }
     }
 

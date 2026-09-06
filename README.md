@@ -51,9 +51,15 @@ Threads render under the line they belong to, markdown and code blocks intact. R
 
 It separates the load-bearing changes from the mechanical bulk, marks whether the author's intent was *stated* or reconstructed from the code, and ends with a short comprehension gate — a few questions you should be able to answer before approving. Every file and line it names is a link into the diff. It runs read-only in the PR's worktree, and the result is kept with the session: reopening the PR shows it instantly, and it tells you when the branch has moved on since.
 
+## Review
+
+**⇧⌘F** reviews the PR in two passes. The first reads the changed files, their callers, and any `CLAUDE.md` or `AGENTS.md` that governs them. The second tries to *disprove* every candidate and throws out what it cannot show is real — the header says how many were rejected, because that number is the evidence the filter did something.
+
+Findings are grouped by file, worst first, filterable by severity, and each one has to name the concrete inputs that produce the wrong result. They also appear inline in the diff, on the line they're about. Dismiss the ones you disagree with; the dismissal sticks.
+
 ## Assistant
 
-A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** runs a review and lists what it found; click one to jump to the line.
+A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** shows the score and opens the review pane.
 
 Chat and Findings run read-only. Asking one to fix a finding lets it edit files, but only inside that disposable worktree — never your checkout.
 
@@ -68,7 +74,7 @@ Chat and Findings run read-only. Asking one to fix a finding lets it edit files,
 | | |
 | --- | --- |
 | `⇧⌘C` `⇧⌘K` | Comments · Commits |
-| `⇧⌘E` | Explain diff |
+| `⇧⌘E` `⇧⌘F` | Explain diff · Review findings |
 | `⌘0` `⌘R` | Overview · Refresh |
 | `⌥⌘0` | Assistant panel |
 | `⌘,` `⌘↩` | Settings · Post comment |

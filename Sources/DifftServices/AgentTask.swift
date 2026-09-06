@@ -3,6 +3,11 @@ import Foundation
 public enum AgentTask: Sendable {
     case clarify(pr: PullRequest, selection: String?, question: String, history: [ChatMessage])
     case review(pr: PullRequest, diffSummary: String)
+    /// Second half of a review: re-check each candidate against the code and
+    /// throw out anything that cannot be proven. Separate from `.review` so
+    /// the verifier reads the diff without the finder's reasoning in front of
+    /// it — a pass that can see why the finding was raised tends to agree.
+    case verifyFindings(pr: PullRequest, candidates: [Finding])
     /// Walk a reviewer through the PR before they read it. Read-only, and
     /// answers in JSON so the app can render it as a view rather than chat.
     case explain(pr: PullRequest, diffSummary: String)
@@ -34,18 +39,121 @@ public enum AgentTask: Sendable {
 
         case let .review(pr, diffSummary):
             return """
-            Review GitHub PR #\(pr.number): \(pr.title)
+            Review GitHub PR #\(pr.number): \(pr.title) for defects.
 
             PR description:
-            \(pr.body)
+            \(pr.body.isEmpty ? "(none)" : pr.body)
 
-            Changed files summary:
+            Changed files:
             \(diffSummary)
 
-            You are inside a checkout of the PR branch. Read the changed files and review for bugs, \
-            security issues, and regressions. Then output your findings as a fenced json block: \
-            a JSON array of objects with keys "severity" (high|medium|low), "file", "line" (integer), \
-            "explanation". Output the json block even if empty.
+            You are inside a checkout of the PR branch.
+
+            1. If the repository has a CLAUDE.md or AGENTS.md — at the root, or in a
+            directory containing a changed file — read it. Its rules are this
+            project's standards, and a clear violation of one is a finding. Only
+            consider a file's own directory and its parents.
+            2. Read the changed files, and enough around them to judge the change in
+            context: callers, the previous behaviour, the invariants relied on.
+            3. Report defects in the code THIS PR introduces or changes.
+
+            This pass produces candidates; a separate pass will try to disprove each
+            one. So do not pad the list — every entry costs the reader trust when it
+            turns out to be wrong.
+
+            Flag only:
+            - Code that will not compile, parse, or resolve.
+            - Logic that produces a wrong result, regardless of input.
+            - A crash, data loss, or corruption path.
+            - A security hole reachable from untrusted input.
+            - A clear violation of a rule you can quote from a CLAUDE.md or AGENTS.md
+            that governs that file.
+
+            Do NOT flag:
+            - Anything that was already true before this PR.
+            - Style, naming, formatting, or anything a linter would catch.
+            - Missing tests, missing docs, or general "consider performance" advice.
+            - Refactors you would prefer. A different reasonable choice is not a defect.
+            - Anything that depends on a specific input or state you cannot show is
+            reachable.
+            - Anything you are not certain about. If you are unsure, leave it out.
+
+            Every finding must name a concrete failure: the inputs or state, and the
+            wrong result they produce. If you cannot write that sentence, you do not
+            have a finding — drop it.
+
+            Answer with a single fenced json block and nothing after it. An empty
+            array is a good answer and a common one.
+
+            ```json
+            [
+              {
+                "severity": "high|medium|low",
+                "category": "correctness|security|crash|data-loss|convention",
+                "file": "path/from/the/changed-files/list.ext",
+                "line": 42,
+                "explanation": "What is wrong, in one or two sentences.",
+                "failureScenario": "Concrete inputs or state, then the wrong result they produce."
+              }
+            ]
+            ```
+
+            Severity: high — data loss, a crash on a reachable path, a security hole,
+            or a wrong result users will hit. medium — a wrong result on a narrower
+            path, or a quoted rule violation. low — a real but minor defect.
+            """
+
+        case let .verifyFindings(pr, candidates):
+            let list = candidates.enumerated().map { i, f in
+                """
+                [\(i)] \(f.file):\(f.line) (\(f.severity))
+                Claim: \(f.explanation)
+                Claimed failure: \(f.failureScenario)
+                """
+            }.joined(separator: "\n\n")
+            return """
+            You are checking candidate review findings on GitHub PR #\(pr.number):
+            \(pr.title). You are inside a checkout of the PR branch.
+
+            Your job is to DISPROVE each one. Assume it is wrong until the code shows
+            otherwise. Most candidate findings are wrong: the reader loses more to one
+            confident false positive than to several missed defects.
+
+            Candidates:
+            \(list)
+
+            For each, open the file and the code around it and decide:
+            - "confirmed" — you traced the failure in the code and can state the
+            inputs or state that reach it.
+            - "plausible" — the defect is real in the code you can see, but reaching
+            it depends on something outside this diff that you could not check.
+            - "rejected" — the claim is wrong, the behaviour is already handled
+            elsewhere, the problem pre-dates this PR, or it is a matter of taste
+            rather than a defect.
+
+            Reject anything you cannot tie to specific lines. Reject anything whose
+            failure you cannot restate yourself in concrete terms — agreeing with the
+            claim's own wording is not verification. Correct the file, line, or
+            severity while you are there if the candidate got them wrong.
+
+            Answer with a single fenced json block and nothing after it, keeping only
+            confirmed and plausible entries. Dropping every candidate is a good
+            outcome when they do not hold up.
+
+            ```json
+            [
+              {
+                "index": 0,
+                "verdict": "confirmed|plausible",
+                "severity": "high|medium|low",
+                "category": "correctness|security|crash|data-loss|convention",
+                "file": "path/from/the/candidate.ext",
+                "line": 42,
+                "explanation": "What is wrong, corrected if the candidate had it wrong.",
+                "failureScenario": "The inputs or state, and the wrong result — in your own words, from the code you read."
+              }
+            ]
+            ```
             """
 
         case let .fix(pr, finding):
@@ -195,7 +303,7 @@ public enum AgentTask: Sendable {
     public var cliArguments: [String] {
         let base = ["-p", prompt, "--output-format", "stream-json", "--verbose"]
         switch self {
-        case .clarify, .review, .explain:
+        case .clarify, .review, .explain, .verifyFindings:
             return base + ["--allowedTools", "Read,Grep,Glob"]
         case .fix:
             // Edit/Write but deliberately no Bash: the agent changes files in

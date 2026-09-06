@@ -14,6 +14,9 @@ public struct FileDiffView: View {
     /// it — otherwise a stale target re-fires on later file switches.
     public var onFocused: () -> Void
     public let comments: [ReviewComment]
+    /// Review findings on this file, rendered under the line they name — the
+    /// defect belongs on the code, not in a list you cross-reference by hand.
+    public let findings: [Finding]
     public var onAsk: (String, String) -> Void  // (selectedText, contextChip)
 
     // Old/new column balance, draggable via the center divider. Persisted
@@ -24,11 +27,13 @@ public struct FileDiffView: View {
         case hunkHeader(index: Int, text: String)
         case row(SideBySideRow)
         case comment(ReviewComment)
+        case finding(Finding)
         var id: String {
             switch self {
             case .hunkHeader(let i, _): return "h\(i)"
             case .row(let r): return "r\(r.id)"
             case .comment(let c): return "c\(c.id)"
+            case .finding(let f): return "f\(f.id)"
             }
         }
     }
@@ -77,7 +82,8 @@ public struct FileDiffView: View {
     public var onAddComment: ((Int, Int, String) -> Void)?
 
     public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
-                fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil, comments: [ReviewComment] = [],
+                fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil,
+                comments: [ReviewComment] = [], findings: [Finding] = [],
                 onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
                 onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
                 onResolveComment: @escaping (ReviewComment) -> Void = { _ in },
@@ -90,12 +96,13 @@ public struct FileDiffView: View {
         self.file = file; self._layout = layout; self._selection = selection
         self.fontSize = fontSize; self.focusLine = focusLine
         self.onFocused = onFocused; self.onAsk = onAsk
-        self.comments = comments
+        self.comments = comments; self.findings = findings
     }
 
 
     nonisolated fileprivate static func build(file: FileDiff, sideBySide: Bool,
-                                  comments: [ReviewComment], key: String) -> Built {
+                                  comments: [ReviewComment], findings: [Finding],
+                                  key: String) -> Built {
         var items: [DiffItem] = []
         var rows: [SideBySideRow] = []
         var base = 0
@@ -127,6 +134,15 @@ public struct FileDiffView: View {
             while insertAt < items.count, case .comment = items[insertAt] { insertAt += 1 }
             items.insert(.comment(c), at: insertAt)
         }
+        // Findings anchor to the new-file line they name, and sit above any
+        // comments on that line — a defect outranks a conversation.
+        for finding in findings {
+            guard let row = rows.first(where: {
+                $0.right?.newNumber == finding.line || $0.left?.newNumber == finding.line
+            }) ?? rows.first(where: { $0.left?.oldNumber == finding.line }),
+                  let idx = items.firstIndex(where: { $0.id == "r\(row.id)" }) else { continue }
+            items.insert(.finding(finding), at: idx + 1)
+        }
         // Runs of consecutive changed rows for the overview rail.
         var blocks: [ChangeBlock] = []
         let total = CGFloat(max(rows.count, 1))
@@ -156,7 +172,8 @@ public struct FileDiffView: View {
     /// card used to stay on screen.
     private var buildKey: String {
         let commentKey = comments.map { "\($0.id):\($0.resolved)" }.joined(separator: ",")
-        return "\(file.path)|\(layout)|\(commentKey)"
+        let findingKey = findings.map { "\($0.id):\($0.dismissed)" }.joined(separator: ",")
+        return "\(file.path)|\(layout)|\(commentKey)|\(findingKey)"
     }
 
     /// Diff geometry for this file: the gutter is sized from the widest line
@@ -190,6 +207,8 @@ public struct FileDiffView: View {
                                 switch item {
                                 case .hunkHeader(_, let text):
                                     HunkHeaderView(text: text, metrics: metrics)
+                                case .finding(let f):
+                                    InlineFindingView(finding: f)
                                 case .comment(let c):
                                     CommentCardView(comment: c,
                                                     onReply: { body in onReplyComment(c, body) },
@@ -303,10 +322,10 @@ public struct FileDiffView: View {
             .task(id: buildKey) {
                 // Off the main actor: a big file builds in background and pops
                 // in; body evaluations stay cheap in the meantime.
-                let f = file, side = layout == .sideBySide, cs = comments, key = buildKey
+                let f = file, side = layout == .sideBySide, cs = comments, fs = findings, key = buildKey
                 guard built.key != key else { return }
                 built = await Task.detached(priority: .userInitiated) {
-                    Self.build(file: f, sideBySide: side, comments: cs, key: key)
+                    Self.build(file: f, sideBySide: side, comments: cs, findings: fs, key: key)
                 }.value
                 if focusLine != nil { /* focus re-applied by focusIfNeeded below via onAppear path */ }
             }
@@ -732,6 +751,64 @@ struct ChangeRailView: View {
 
     private func ratio(_ y: CGFloat, in height: CGFloat) -> CGFloat {
         min(max(y / max(height, 1), 0), 1)
+    }
+}
+
+/// A review finding on the line it names.
+///
+/// Deliberately quieter than a comment card: it is annotation on the code, not
+/// a conversation, and a full-width panel per finding would bury the diff it
+/// is about.
+struct InlineFindingView: View {
+    let finding: Finding
+    @State private var expanded = false
+
+    private var tint: Color {
+        switch finding.severity.lowercased() {
+        case "high": return Palette.removed
+        case "medium": return Palette.warning
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.xxs) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small).foregroundStyle(tint)
+                Text(finding.severity.uppercased())
+                    .font(.caption2.bold()).foregroundStyle(tint)
+                // Clamped until opened: an unclamped explanation ran seven
+                // lines and shoved the code it annotates off the screen.
+                Text(finding.explanation)
+                    .font(Typography.meta)
+                    .foregroundStyle(finding.dismissed ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                    .strikethrough(finding.dismissed)
+                    .lineLimit(expanded ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: expanded)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+                if true {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .imageScale(.small).foregroundStyle(.tertiary)
+                }
+            }
+            if expanded, !finding.failureScenario.isEmpty {
+                Text(finding.failureScenario)
+                    .font(Typography.meta).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, Spacing.lg)
+            }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08))
+        .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 2) }
+        .contentShape(Rectangle())
+        .onTapGesture { expanded.toggle() }
+        .help(finding.failureScenario.isEmpty ? finding.explanation : finding.failureScenario)
     }
 }
 

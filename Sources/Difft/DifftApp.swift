@@ -74,6 +74,12 @@ struct DifftCommands: Commands {
             .keyboardShortcut("e", modifiers: [.command, .shift])
             .disabled(model.session == nil)
 
+            Button("Review Findings") {
+                Task { await model.review() }
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .disabled(model.session == nil)
+
             Button("All Commits") {
                 model.closeCommit()
                 model.session?.pane = .commits

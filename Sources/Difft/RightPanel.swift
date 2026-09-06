@@ -20,15 +20,7 @@ struct RightPanel: View {
             if let session = model.session {
                 switch tab {
                 case 0: ChatTab(session: session, controller: controller, pendingAsk: $pendingAsk)
-                default: FindingsTab(session: session, controller: controller,
-                                    onAskFinding: { f in
-                                        pendingAsk = (text: f.explanation, chip: "\(f.file):\(f.line)")
-                                        tab = 0
-                                    },
-                                    onFixFinding: { f in
-                                        tab = 0  // the fix streams into chat
-                                        Task { await controller.runFix(f) }
-                                    })
+                default: FindingsTab(session: session, controller: controller)
                 }
             } else {
                 Spacer()
@@ -116,94 +108,69 @@ struct ChatTab: View {
     }
 }
 
+/// Compact companion to the Review pane, not a second copy of it.
+///
+/// The findings list moved to its own centre pane — it needs width to group by
+/// file, filter by severity and show each finding's failure scenario. What is
+/// useful in a 300pt column is the score and a way through to the pane.
 struct FindingsTab: View {
+    @EnvironmentObject var model: AppModel
     @ObservedObject var session: ReviewSession
     @ObservedObject var controller: AgentController
-    var onAskFinding: (Finding) -> Void = { _ in }
-    var onFixFinding: (Finding) -> Void = { _ in }
-    @State private var fixTarget: Finding?
+
+    private var findings: [Finding] { session.data.findings.filter { !$0.dismissed } }
+    private var isRunning: Bool {
+        if case .running(let label) = session.agentState {
+            return label == "Reviewing" || label == "Verifying"
+        }
+        return false
+    }
 
     var body: some View {
-        VStack {
-            Button("Run Claude review") { Task { await controller.runReview() } }
-                .disabled(!session.agentState.canStart)
-                .padding(.top, 8)
-            List(Array(session.data.findings.enumerated()), id: \.offset) { _, f in
-                VStack(alignment: .leading, spacing: 4) {
-                    let sevColor: Color = f.severity == "high" ? Palette.removed
-                        : f.severity == "medium" ? Palette.warning : Color.secondary
-                    let fileName = String(f.file.split(separator: "/").last ?? "")
-                    let dir = f.file.split(separator: "/").dropLast().joined(separator: "/")
-                    HStack(spacing: 6) {
-                        Text(f.severity.uppercased())
-                            .font(.caption2.bold())
-                            .foregroundStyle(sevColor)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(sevColor.opacity(0.18), in: Capsule())
-                        Text(verbatim: "\(fileName):\(f.line)")
-                            .font(.callout.monospaced().bold())
-                            .textSelection(.enabled)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Button("Fix it") { fixTarget = f }
-                            .buttonStyle(.link)
-                            .font(.caption)
-                            .disabled(!session.agentState.canStart)
-                            .help("Have Claude write a fix in the PR worktree")
-                    }
-                    if !dir.isEmpty {
-                        Text(dir)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(f.file)
-                    }
-                    Text(f.explanation)
-                        .textSelection(.enabled)
+        VStack(spacing: Spacing.md) {
+            if isRunning {
+                // Said "No review yet" all the way through a run, which read
+                // as the click having done nothing.
+                HStack(spacing: Spacing.xs) {
+                    ProgressView().controlSize(.small)
+                    Text(controller.lastRunLabel == "Verifying" ? "Verifying…" : "Reviewing…")
+                        .font(Typography.meta).foregroundStyle(.secondary)
                 }
-                .padding(.vertical, 3)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    session.selectedFile = f.file
-                    // The diff view scrolls to and selects this line.
-                    session.selectedLines = f.line...f.line
-                }
-                .contextMenu {
-                    Button {
-                        fixTarget = f
-                    } label: {
-                        Label("Fix this finding", systemImage: "wrench.and.screwdriver")
-                    }
-                    .disabled(!session.agentState.canStart)
-                    Button {
-                        onAskFinding(f)
-                    } label: {
-                        Label("Ask Claude about this finding", systemImage: "sparkles")
-                    }
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            "[\(f.severity)] \(f.file):\(f.line)\n\(f.explanation)", forType: .string)
-                    } label: {
-                        Label("Copy", systemImage: "doc.on.doc")
+            } else if session.data.reviewStamp == nil {
+                Text("No review yet.")
+                    .font(Typography.meta).foregroundStyle(.secondary)
+            } else if findings.isEmpty {
+                Label("No defects found", systemImage: "checkmark.seal")
+                    .font(Typography.body).foregroundStyle(Palette.added)
+            } else {
+                VStack(spacing: Spacing.xs) {
+                    ForEach(["high", "medium", "low"], id: \.self) { severity in
+                        let n = findings.count { $0.severity.lowercased() == severity }
+                        if n > 0 {
+                            HStack(spacing: Spacing.xs) {
+                                SeverityChip(severity: severity)
+                                Text("\(n)").font(Typography.metaDigits)
+                                Spacer(minLength: 0)
+                            }
+                        }
                     }
                 }
+                .frame(maxWidth: 160)
             }
+            Button {
+                Task { await model.review() }
+            } label: {
+                Label(session.data.reviewStamp == nil ? "Run Claude review" : "Open review",
+                      systemImage: "checklist")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isRunning || (!session.agentState.canStart && session.data.reviewStamp == nil))
+            .help("Findings open in their own pane (\u{21E7}\u{2318}F)")
+            Spacer()
             AgentRunBar(session: session)
         }
-        .confirmationDialog("Let Claude edit files to fix this?",
-                            isPresented: Binding(get: { fixTarget != nil },
-                                                 set: { if !$0 { fixTarget = nil } }),
-                            titleVisibility: .visible) {
-            Button("Write the fix") {
-                if let f = fixTarget { onFixFinding(f) }
-                fixTarget = nil
-            }
-            Button("Cancel", role: .cancel) { fixTarget = nil }
-        } message: {
-            Text("Claude edits files in this PR's worktree — a disposable checkout under Application Support, never your clone — and runs no commands. Nothing is committed or pushed; you review the patch afterwards.")
-        }
+        .padding(.top, Spacing.md)
+        .frame(maxWidth: .infinity)
     }
 }
 

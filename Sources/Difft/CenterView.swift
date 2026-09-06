@@ -189,6 +189,8 @@ struct FileDiffContainer: View {
             PRCommentsView(session: session)
         case .explain:
             ExplainView(session: session, controller: model.agent)
+        case .review:
+            ReviewView(session: session, controller: model.agent)
         case .diff:
             diffOrOverview
         }
@@ -205,6 +207,7 @@ struct FileDiffContainer: View {
                 FileDiffView(file: file, layout: $layout, selection: $selection, fontSize: fontSize,
                          focusLine: session.selectedLines?.lowerBound,
                          comments: model.comments.filter { $0.path == file.path },
+                         findings: session.data.findings.filter { $0.file == file.path },
                          onFocused: { session.selectedLines = nil },
                          onAsk: onAsk,
                          onReplyComment: { c, body in Task { await model.reply(to: c, body: body) } },
