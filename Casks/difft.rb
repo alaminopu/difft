@@ -1,6 +1,6 @@
 cask "difft" do
-  version "0.1.0"
-  sha256 "1c87f53ba0ba46c19f4da10adfec551e4f18a68fca277b8bb1e7aac8460382dc"
+  version "0.1.1"
+  sha256 "a6ad42cfa9b92066d2623c48561534ff52a2f8e120c793a5e7303034d41b6019"
 
   url "https://github.com/alaminopu/difft/releases/download/#{version}/Difft-#{version}.zip"
   name "Difft"

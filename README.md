@@ -72,7 +72,7 @@ Chat and Findings can look at anything and change nothing. Verify runs the PR's 
 ```sh
 swift test        # 170 tests, no network or CLI needed
 swift run Difft   # dev build
-scripts/release.sh 0.1.0
+scripts/release.sh 0.1.1
 ```
 
 Four targets: `DifftCore` (diff model and parsing, pure logic), `DifftServices` (subprocesses, sessions, reports), `DifftUI` (the renderer), `Difft` (the app).
