@@ -4,9 +4,8 @@ import DifftCore
 public struct ReportInput {
     public let session: SessionData
     public let files: [FileDiff]
-    public let screenshots: [(name: String, pngData: Data)]
-    public init(session: SessionData, files: [FileDiff], screenshots: [(name: String, pngData: Data)]) {
-        self.session = session; self.files = files; self.screenshots = screenshots
+    public init(session: SessionData, files: [FileDiff]) {
+        self.session = session; self.files = files
     }
 }
 
@@ -40,21 +39,15 @@ public enum ReportBuilder {
         <!doctype html><html><head><meta charset="utf-8"><title>Difft report — PR #\(s.pr.number)</title>
         <style>
         body { font: 14px -apple-system, sans-serif; margin: 2rem auto; max-width: 60rem; }
-        .badge { padding: 2px 10px; border-radius: 10px; color: white; }
-        .pass { background: #2da44e; } .fail { background: #cf222e; } .inconclusive { background: #9a6700; }
         table { border-collapse: collapse; width: 100%; }
         td, th { border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top; }
         .sev-high { color: #cf222e; font-weight: 700; } .sev-medium { color: #9a6700; } .sev-low { color: #57606a; }
         pre { background: #f6f8fa; padding: 8px; overflow-x: auto; }
-        img { max-width: 100%; border: 1px solid #ddd; }
         .add { background: #dafbe1; } .del { background: #ffebe9; }
         </style></head><body>
         <h1>PR #\(s.pr.number): \(escape(s.pr.title))</h1>
         <p>Branch <code>\(escape(s.pr.headRefName))</code> by \(escape(s.pr.authorLogin))
         """
-        if let v = s.verdict {
-            out += " — verdict: <span class=\"badge \(escape(v))\">\(escape(v))</span>"
-        }
         out += "</p>\n<h2>Findings (\(findings.count))</h2>\n"
         if findings.isEmpty {
             out += "<p>No findings.</p>\n"
@@ -65,13 +58,6 @@ public enum ReportBuilder {
                 out += "<td><code>\(escape(f.file)):\(f.line)</code></td><td>\(escape(f.explanation))</td></tr>\n"
             }
             out += "</table>\n"
-        }
-
-        if !input.screenshots.isEmpty {
-            out += "<h2>Verification evidence</h2>\n"
-            for shot in input.screenshots {
-                out += "<h4>\(escape(shot.name))</h4><img src=\"data:image/png;base64,\(shot.pngData.base64EncodedString())\">\n"
-            }
         }
 
         if !s.chat.isEmpty {

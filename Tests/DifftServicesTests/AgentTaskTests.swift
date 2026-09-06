@@ -31,13 +31,6 @@ final class AgentTaskTests: XCTestCase {
         XCTAssertTrue(task.cliArguments.contains("Read,Grep,Glob"))
     }
 
-    func testVerifyArgsSkipPermissions() {
-        let task = AgentTask.verify(pr: pr)
-        XCTAssertTrue(task.cliArguments.contains("--dangerously-skip-permissions"))
-        XCTAssertTrue(task.prompt.contains("difft-evidence"))
-        XCTAssertTrue(task.prompt.contains("Add login"))
-    }
-
     func testFixPromptAndTools() {
         let finding = Finding(severity: "medium", file: "a/b.py", line: 42,
                               explanation: "Throttle slots leak on the error path")

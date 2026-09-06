@@ -14,8 +14,7 @@ final class SessionStoreTests: XCTestCase {
             pr: PullRequest(number: 7, title: "T", body: "B", headRefName: "h", authorLogin: "a"),
             repoDir: "/tmp/repo", viewedFiles: ["a.txt"],
             chat: [ChatMessage(role: "user", text: "why?", contextChip: "a.txt:1-3")],
-            findings: [Finding(severity: "high", file: "a.txt", line: 3, explanation: "bad")],
-            verdict: nil)
+            findings: [Finding(severity: "high", file: "a.txt", line: 3, explanation: "bad")])
     }
 
     func testRoundTrip() throws {

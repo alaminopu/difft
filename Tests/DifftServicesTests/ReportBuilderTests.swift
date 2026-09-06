@@ -9,18 +9,15 @@ final class ReportBuilderTests: XCTestCase {
             chat: [ChatMessage(role: "user", text: "q1", contextChip: "a.txt:1-2"),
                    ChatMessage(role: "assistant", text: "a1", contextChip: nil)],
             findings: [Finding(severity: "low", file: "a.txt", line: 1, explanation: "nit"),
-                       Finding(severity: "high", file: "a.txt", line: 2, explanation: "bug & bad")],
-            verdict: "pass")
+                       Finding(severity: "high", file: "a.txt", line: 2, explanation: "bug & bad")])
         let files = [FileDiff(path: "a.txt", kind: .modified,
                               hunks: [Hunk(header: "@@ -1 +1 @@", lines: [DiffLine(kind: .addition, oldNumber: nil, newNumber: 1, text: "hi")])])]
-        return ReportInput(session: session, files: files, screenshots: [("before.png", Data([0x89, 0x50]))])
+        return ReportInput(session: session, files: files)
     }
 
     func testContainsCoreSections() {
         let html = ReportBuilder.html(for: input())
         XCTAssertTrue(html.contains("PR #3"))
-        XCTAssertTrue(html.contains("pass"))
-        XCTAssertTrue(html.contains("data:image/png;base64,"))
         XCTAssertTrue(html.contains("q1"))
         XCTAssertTrue(html.contains("<details>"))
     }
@@ -50,11 +47,9 @@ final class ReportBuilderTests: XCTestCase {
         let pr = PullRequest(number: 1, title: "safe", body: "B", headRefName: "h", authorLogin: "a")
         let session = SessionData(pr: pr, repoDir: "/tmp/myrepo", viewedFiles: [],
             chat: [],
-            findings: [Finding(severity: "high\" onmouseover=\"alert('xss)", file: "a.txt", line: 1, explanation: "test")],
-            verdict: "pass\" onclick=\"bad")
+            findings: [Finding(severity: "high\" onmouseover=\"alert('xss)", file: "a.txt", line: 1, explanation: "test")])
         let files = [FileDiff(path: "a.txt", kind: .modified, hunks: [])]
-        let html = ReportBuilder.html(for: ReportInput(session: session, files: files, screenshots: []))
-        XCTAssertFalse(html.contains("\" onclick"))
+        let html = ReportBuilder.html(for: ReportInput(session: session, files: files))
         XCTAssertFalse(html.contains("\" onmouseover"))
         XCTAssertTrue(html.contains("&quot;"))
     }

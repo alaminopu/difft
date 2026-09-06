@@ -25,10 +25,9 @@ public struct SessionData: Codable, Equatable, Sendable {
     public var viewedFiles: Set<String>
     public var chat: [ChatMessage]
     public var findings: [Finding]
-    public var verdict: String?
-    public init(pr: PullRequest, repoDir: String, viewedFiles: Set<String>, chat: [ChatMessage], findings: [Finding], verdict: String?) {
+    public init(pr: PullRequest, repoDir: String, viewedFiles: Set<String>, chat: [ChatMessage], findings: [Finding]) {
         self.pr = pr; self.repoDir = repoDir; self.viewedFiles = viewedFiles
-        self.chat = chat; self.findings = findings; self.verdict = verdict
+        self.chat = chat; self.findings = findings
     }
 }
 

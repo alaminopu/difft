@@ -248,7 +248,7 @@ struct MainSplitView: View {
     @State private var pendingAsk: (text: String, chip: String)?
     // Hidden by default: the diff is the workspace, the assistant is an
     // inspector. Auto-opens when the user asks about a selection or when
-    // findings/verdict arrive (see AgentStatusView).
+    // findings arrive (see AgentStatusView).
     @AppStorage("showRightPanel") private var showRightPanel = false
 
     @AppStorage("rightPanelTab") private var panelTab = 0
@@ -300,10 +300,9 @@ struct MainSplitView: View {
     }
 
     private func generateReport() {
-        let evidence = model.session != nil ? currentEvidence() : []
         Task {
             do {
-                let url = try await model.generateReport(evidence: evidence)
+                let url = try await model.generateReport()
                 NSWorkspace.shared.open(url)
                 model.errorBanner = nil
             } catch {
@@ -318,13 +317,6 @@ struct MainSplitView: View {
             try? WorktreeManager(runner: DefaultProcessRunner(), baseDir: baseDir)
                 .prune(olderThan: 0)
         }
-    }
-
-    private func currentEvidence() -> [URL] {
-        guard let s = model.session else { return [] }
-        let dir = AppModel.appSupportDir
-            .appendingPathComponent("worktrees/\(model.repoName)-pr\(s.data.pr.number)/difft-evidence")
-        return EvidenceWatcher.currentPNGs(in: dir)
     }
 }
 
@@ -341,7 +333,6 @@ struct ToolStrip: View {
     private let items: [(icon: String, label: String)] = [
         ("bubble.left.and.text.bubble.right", "Claude"),
         ("checklist", "Findings"),
-        ("checkmark.seal", "Verify"),
     ]
 
     var body: some View {

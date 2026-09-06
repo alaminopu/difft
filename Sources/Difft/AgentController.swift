@@ -11,15 +11,13 @@ final class AgentController: ObservableObject {
         let detail: String?
     }
     @Published var toolActivity: [ToolCall] = []
-    @Published var evidence: [URL] = []
-    /// Label of the current/most recent run ("Clarifying"/"Reviewing"/
-    /// "Verifying") so tabs can show only the activity that belongs to them
-    /// instead of another run's stale log.
+    /// Label of the current/most recent run ("Clarifying"/"Reviewing") so
+    /// tabs can show only the activity that belongs to them instead of
+    /// another run's stale log.
     @Published var lastRunLabel: String?
 
     private let model: AppModel
     private let agent = AgentService()
-    private var watcher: EvidenceWatcher?
     /// Set by `cancel()`; consulted when a run's body throws (or reports an
     /// error result) so a user-requested cancel lands back on `.idle`
     /// instead of `.failed`. Reset at the start of every run.
@@ -112,35 +110,6 @@ final class AgentController: ObservableObject {
         }
     }
 
-    /// Runs the verify task, which executes the PR's code with
-    /// `--dangerously-skip-permissions`. `verifyConfirmed` must be explicitly
-    /// `true` — the UI is responsible for presenting the confirm dialog before
-    /// calling this; the controller itself never skips that gate.
-    func runVerify(verifyConfirmed: Bool) async {
-        guard verifyConfirmed else { return }
-        guard let session = model.session else { return }
-        let task = AgentTask.verify(pr: session.data.pr)
-        await withWorktree("Verifying") { wt in
-            let evidenceDir = wt.appendingPathComponent("difft-evidence")
-            let w = EvidenceWatcher(directory: evidenceDir)
-            w.onChange = { urls in Task { @MainActor in self.evidence = urls } }
-            w.start(); self.watcher = w
-            defer { w.stop(); self.watcher = nil }
-
-            var final = ""
-            for try await event in agent.run(task, in: wt) {
-                self.consume(event, accumulatingResult: &final)
-            }
-            self.evidence = EvidenceWatcher.currentPNGs(in: evidenceDir)
-            if let v = EvidenceWatcher.verdict(in: evidenceDir) {
-                session.data.verdict = v.verdict
-                session.data.chat.append(ChatMessage(role: "assistant",
-                    text: "Verification \(v.verdict): \(v.summary)", contextChip: nil))
-            } else {
-                session.data.verdict = "inconclusive"
-            }
-        }
-    }
 
     func cancel() {
         userCancelled = true

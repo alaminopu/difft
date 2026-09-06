@@ -47,11 +47,11 @@ Threads render under the line they belong to, markdown and code blocks intact. R
 
 ## Assistant
 
-A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** runs a review and lists what it found; click one to jump to the line. **Verify** starts the app and drives a browser to check the PR does what it claims.
+A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** runs a review and lists what it found; click one to jump to the line.
 
-Chat and Findings can look at anything and change nothing. Verify runs the PR's code with permission checks disabled, so it asks every time, naming the PR.
+Chat and Findings run read-only. Asking one to fix a finding lets it edit files, but only inside that disposable worktree — never your checkout.
 
-**Reports** write a self-contained HTML file to `~/Documents/Difft-reports/` — findings, transcript, evidence, and the full diff, with no external resources.
+**Reports** write a self-contained HTML file to `~/Documents/Difft-reports/` — findings, transcript, and the full diff, with no external resources.
 
 ## Settings
 

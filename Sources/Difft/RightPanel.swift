@@ -21,7 +21,7 @@ struct RightPanel: View {
     var body: some View {
         let controller = model.agent
         VStack(spacing: 0) {
-            Text(["Claude", "Findings", "Verify"][min(max(tab, 0), 2)])
+            Text(["Claude", "Findings"][min(max(tab, 0), 1)])
                 .font(.caption.smallCaps())
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -31,7 +31,7 @@ struct RightPanel: View {
             if let session = model.session {
                 switch tab {
                 case 0: ChatTab(session: session, controller: controller, pendingAsk: $pendingAsk)
-                case 1: FindingsTab(session: session, controller: controller,
+                default: FindingsTab(session: session, controller: controller,
                                     onAskFinding: { f in
                                         pendingAsk = (text: f.explanation, chip: "\(f.file):\(f.line)")
                                         tab = 0
@@ -40,7 +40,6 @@ struct RightPanel: View {
                                         tab = 0  // the fix streams into chat
                                         Task { await controller.runFix(f) }
                                     })
-                default: VerifyTab(session: session, controller: controller)   // Task 15
                 }
             } else {
                 Spacer()
@@ -48,7 +47,13 @@ struct RightPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: pendingAsk?.chip) { if pendingAsk != nil { tab = 0 } }
-        .onAppear { consumeExplain(controller) }
+        .onAppear {
+            // The tab index is persisted, and there used to be a third tab.
+            // A session restored onto the removed index would show Findings
+            // while no tool-strip icon looked selected.
+            if tab > 1 { tab = 1 }
+            consumeExplain(controller)
+        }
         .onChange(of: model.pendingExplainDiff) { consumeExplain(controller) }
         .onReceive(NotificationCenter.default.publisher(for: .difftCancelAgent)) { _ in model.agent.cancel() }
     }
@@ -257,117 +262,7 @@ struct AgentStatusView: View {
         .onChange(of: session.data.findings.count) { _, n in
             if n > 0 { showRightPanel = true }
         }
-        .onChange(of: session.data.verdict) { _, v in
-            if v != nil { showRightPanel = true }
-        }
     }
 }
 
 extension Notification.Name { static let difftCancelAgent = Notification.Name("difftCancelAgent") }
-
-struct VerifyTab: View {
-    /// Rough tool taxonomy so a long activity log stays scannable.
-    static func icon(for tool: String) -> String {
-        switch tool {
-        case "Bash": return "terminal"
-        case "Read", "NotebookEdit": return "doc.text"
-        case "Edit", "Write": return "square.and.pencil"
-        case "Grep", "Glob": return "magnifyingglass"
-        case "WebFetch", "WebSearch": return "globe"
-        case "Task": return "person.2"
-        default: return "wrench.and.screwdriver"
-        }
-    }
-
-    @ObservedObject var session: ReviewSession
-    @ObservedObject var controller: AgentController
-    @State private var confirmShown = false
-    // Decoded lazily and cached by URL: without this, `body` re-decodes every
-    // (possibly multi-MB) screenshot on the main thread on every render —
-    // and during verify, `controller.streamingText`/`toolActivity` changes
-    // trigger a render on every stream delta.
-    @State private var imageCache: [URL: NSImage] = [:]
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Button("Verify UI changes") { confirmShown = true }
-                .disabled(!session.agentState.canStart)
-                .confirmationDialog(
-                    "Run PR code with permissions disabled?",
-                    isPresented: $confirmShown, titleVisibility: .visible) {
-                    Button("Run verification", role: .destructive) {
-                        Task { await controller.runVerify(verifyConfirmed: true) }
-                    }
-                    .accessibilityLabel("Run verification")
-                    Button("Cancel", role: .cancel) {}
-                        .accessibilityLabel("Cancel verification")
-                } message: {
-                    Text("This runs the PR's code with Claude's permission checks disabled. " +
-                         "Arbitrary code from PR #\(session.data.pr.number) ('\(session.data.pr.title)') will be able to " +
-                         "execute on this machine. Only proceed if you trust this PR's author.")
-                }
-
-            if let verdict = session.data.verdict {
-                Text("Verdict: \(verdict)").font(.headline)
-                    .foregroundStyle(verdict == "pass" ? .green : verdict == "fail" ? .red : .orange)
-            }
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    // Only this run's activity: another run's (review/clarify)
-                    // log bleeding in here reads as stale garbage.
-                    if controller.lastRunLabel == "Verifying" {
-                        ForEach(controller.toolActivity) { call in
-                            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                                Image(systemName: Self.icon(for: call.name))
-                                    .imageScale(.small)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 14)
-                                Text(call.name).font(.caption.bold())
-                                if let detail = call.detail {
-                                    Text(detail)
-                                        .font(.caption.monospaced())
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                        .truncationMode(.middle)
-                                        .help(detail)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if !controller.streamingText.isEmpty {
-                            Text(controller.streamingText.suffix(2000))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                    } else if case .running = session.agentState {
-                        Text("Another agent task is running…")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))]) {
-                        ForEach(controller.evidence, id: \.self) { url in
-                            if let img = imageCache[url] {
-                                Image(nsImage: img).resizable().scaledToFit()
-                                    .onTapGesture { NSWorkspace.shared.open(url) }
-                            }
-                        }
-                    }
-                }.padding(8)
-            }
-        }
-        .padding(.top, 8)
-        .safeAreaInset(edge: .bottom, spacing: 0) { AgentRunBar(session: session) }
-        .task(id: controller.evidence) { refreshImageCache() }
-    }
-
-    /// Decodes only newly-seen evidence URLs and drops entries no longer
-    /// present, so a body re-render never re-reads an already-decoded PNG.
-    private func refreshImageCache() {
-        var updated: [URL: NSImage] = [:]
-        for url in controller.evidence {
-            updated[url] = imageCache[url] ?? NSImage(contentsOf: url)
-        }
-        imageCache = updated
-    }
-}

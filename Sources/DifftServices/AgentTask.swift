@@ -3,7 +3,6 @@ import Foundation
 public enum AgentTask: Sendable {
     case clarify(pr: PullRequest, selection: String?, question: String, history: [ChatMessage])
     case review(pr: PullRequest, diffSummary: String)
-    case verify(pr: PullRequest)
     /// Write a minimal fix for one review finding. Gets file-edit tools but
     /// no shell — it changes files in the PR's disposable worktree and runs
     /// nothing, so it never needs `--dangerously-skip-permissions`.
@@ -64,20 +63,6 @@ public enum AgentTask: Sendable {
             Finish with a short summary: what you changed and why, or why you
             changed nothing.
             """
-
-        case let .verify(pr):
-            return """
-            Verify GitHub PR #\(pr.number): \(pr.title)
-
-            The PR claims:
-            \(pr.body)
-
-            You are inside a checkout of the PR branch. Start the application following this \
-            repository's own CLAUDE.md / skill instructions, then verify the claimed UI changes in \
-            a real browser. Save before/after screenshot evidence as PNG files into ./difft-evidence/ \
-            (create it). Finish by writing ./difft-evidence/verdict.json with keys "verdict" \
-            (pass|fail|inconclusive) and "summary".
-            """
         }
     }
 
@@ -90,8 +75,6 @@ public enum AgentTask: Sendable {
             // Edit/Write but deliberately no Bash: the agent changes files in
             // the worktree, it does not run anything.
             return base + ["--allowedTools", "Read,Grep,Glob,Edit,Write"]
-        case .verify:
-            return base + ["--dangerously-skip-permissions"]
         }
     }
 }

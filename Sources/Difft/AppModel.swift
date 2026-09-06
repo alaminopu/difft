@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
         didSet { fileTree = FileTreeNode.build(from: files) }
     }
     @Published private(set) var fileTree: [FileTreeNode] = []
+
     @Published var comments: [ReviewComment] = []
     @Published var commits: [Commit] = []
     /// The PR being opened, so the list and centre pane can say so. Opening
@@ -176,7 +177,7 @@ final class AppModel: ObservableObject {
             // round-trips first left the window unchanged for well over a
             // second after the click, with the diff already in hand.
             let data = sessionStore.load(repo: repoName, prNumber: pr.number)
-                ?? SessionData(pr: pr, repoDir: repoDir.path, viewedFiles: [], chat: [], findings: [], verdict: nil)
+                ?? SessionData(pr: pr, repoDir: repoDir.path, viewedFiles: [], chat: [], findings: [])
             session = ReviewSession(data: data)
             // Land on the PR overview; the user picks a file from the tree.
             session?.selectedFile = nil
@@ -444,20 +445,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Snapshots session/files state on the main actor, then does the actual
-    /// screenshot reads, HTML render, and disk write off the main actor in a
-    /// detached task — this touches disk (potentially many evidence PNGs) and
-    /// must not block the UI.
-    func generateReport(evidence: [URL]) async throws -> URL {
+    /// Snapshots session/files state on the main actor, then renders the HTML
+    /// and writes it off the main actor in a detached task — a full diff can
+    /// be megabytes and must not block the UI.
+    func generateReport() async throws -> URL {
         guard let session else { throw GitHubServiceError.commandFailed("no session") }
         let sessionData = session.data
         let filesSnapshot = files
         let repo = repoName
         return try await Task.detached(priority: .userInitiated) {
-            let screenshots: [(name: String, pngData: Data)] = evidence.compactMap { url in
-                (try? Data(contentsOf: url)).map { (url.lastPathComponent, $0) }
-            }
-            let html = ReportBuilder.html(for: ReportInput(session: sessionData, files: filesSnapshot, screenshots: screenshots))
+            let html = ReportBuilder.html(for: ReportInput(session: sessionData, files: filesSnapshot))
             let url = ReportBuilder.defaultURL(repoName: repo, prNumber: sessionData.pr.number, date: Date())
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data(html.utf8).write(to: url)
