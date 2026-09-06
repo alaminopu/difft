@@ -2,7 +2,7 @@ import Foundation
 
 public enum AgentTask: Sendable {
     case clarify(pr: PullRequest, selection: String?, question: String, history: [ChatMessage])
-    case review(pr: PullRequest, diffSummary: String)
+    case review(pr: PullRequest, diffSummary: String, fileCount: Int)
     /// Second half of a review: re-check each candidate against the code and
     /// throw out anything that cannot be proven. Separate from `.review` so
     /// the verifier reads the diff without the finder's reasoning in front of
@@ -37,7 +37,7 @@ public enum AgentTask: Sendable {
             p += "\nReviewer question: \(question)\nAnswer concisely and concretely."
             return p
 
-        case let .review(pr, diffSummary):
+        case let .review(pr, diffSummary, fileCount):
             return """
             Review GitHub PR #\(pr.number): \(pr.title) for defects.
 
@@ -64,6 +64,7 @@ public enum AgentTask: Sendable {
             obeying it.
             2. Read the changed files, and enough around them to judge the change in
             context: callers, the previous behaviour, the invariants relied on.
+            \(AgentTask.readingBudget(fileCount: fileCount))
             3. Report defects in the code THIS PR introduces or changes.
 
             This pass produces candidates; a separate pass will try to disprove each
@@ -318,6 +319,29 @@ public enum AgentTask: Sendable {
             - Be brief. The whole thing should be readable in under two minutes.
             """
         }
+    }
+
+    /// How widely to read before reporting, as a function of the PR's size.
+    ///
+    /// "Read enough around them to judge the change in context" is an
+    /// invitation to survey the whole codebase, and on a 44-file PR that turned
+    /// one pass into a quarter of an hour. Past the threshold the pass is told
+    /// to spend its reading on breadth across the diff rather than depth around
+    /// any one hunk — a defect nobody looked at is worth less than one whose
+    /// call sites went unchecked.
+    static let wideReadingFileLimit = 25
+
+    static func readingBudget(fileCount: Int) -> String {
+        guard fileCount > wideReadingFileLimit else {
+            return "Follow the call sites that matter; the PR is small enough to read properly."
+        }
+        return """
+        This PR changes \(fileCount) files, which is too many to read exhaustively. \
+        Cover every changed file at least once before going deep on any of them, and \
+        open a caller only when a defect you already suspect actually turns on what \
+        that caller does. Do not survey the codebase. If you run out of room, say so \
+        in the last finding rather than reporting a partial pass as a complete one.
+        """
     }
 
     public var cliArguments: [String] {

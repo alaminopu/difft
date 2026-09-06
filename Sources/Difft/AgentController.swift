@@ -15,6 +15,9 @@ final class AgentController: ObservableObject {
     /// tabs can show only the activity that belongs to them instead of
     /// another run's stale log.
     @Published var lastRunLabel: String?
+    /// When the current run started. A thorough review is minutes long, and a
+    /// spinner with no clock on it is indistinguishable from a hang.
+    @Published var runStartedAt: Date?
 
     private let model: AppModel
     private let agent = AgentService()
@@ -34,6 +37,7 @@ final class AgentController: ObservableObject {
         session.agentState = .running(label)
         streamingText = ""; toolActivity = []
         lastRunLabel = label
+        runStartedAt = Date()
         do {
             let wt = try await worktrees.ensureWorktree(
                 cloneDir: repoDir, repoName: model.repoName, prNumber: session.data.pr.number)
@@ -46,6 +50,7 @@ final class AgentController: ObservableObject {
         } catch {
             session.agentState = .afterFailure(userCancelled: userCancelled, message: "\(label): \(error.localizedDescription)")
         }
+        runStartedAt = nil
         do {
             try model.sessionStore.save(session.data)
         } catch {
@@ -81,7 +86,8 @@ final class AgentController: ObservableObject {
         await withWorktree("Reviewing") { wt in
             var found = ""
             for try await event in agent.run(
-                    AgentTask.review(pr: session.data.pr, diffSummary: summary), in: wt) {
+                    AgentTask.review(pr: session.data.pr, diffSummary: summary,
+                                     fileCount: self.model.files.count), in: wt) {
                 self.consume(event, accumulatingResult: &found)
             }
             let candidates = FindingsParser.parse(found.isEmpty ? self.streamingText : found)

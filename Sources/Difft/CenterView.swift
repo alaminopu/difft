@@ -125,6 +125,7 @@ struct PROverviewView: View {
                         .foregroundStyle(.red).monospacedDigit()
                     CommentsButton(session: session)
                     CommitsButton(session: session)
+                    FindingsButton(session: session)
                     Spacer()
                     if let note = model.refreshNote {
                         Text(note)
@@ -147,11 +148,17 @@ struct PROverviewView: View {
                     Button {
                         Task { await model.explainDiff() }
                     } label: {
-                        Label("Explain diff", systemImage: "sparkles")
+                        // Says which it is: running the agent costs a couple of
+                        // minutes, opening a cached walkthrough is instant, and
+                        // one label for both hid that difference.
+                        Label(session.data.explanation == nil ? "Explain diff" : "Walkthrough",
+                              systemImage: "sparkles")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!session.agentState.canStart && session.data.explanation == nil)
-                    .help("Open the PR walkthrough (\u{21E7}\u{2318}E)")
+                    .help(session.data.explanation == nil
+                          ? "Read the PR and explain it (\u{21E7}\u{2318}E)"
+                          : "Open the PR walkthrough (\u{21E7}\u{2318}E)")
                 }
                 .font(.callout)
                 Divider()
@@ -161,6 +168,11 @@ struct PROverviewView: View {
                 } else {
                     MarkdownBodyView(text: pr.body)
                 }
+                // Work already done on this PR, surfaced where you land rather
+                // than left behind two keystrokes away. Nothing shows until
+                // there is something to show, so the page does not grow chrome
+                // for a PR you have not touched.
+                OverviewDigest(session: session)
                 Spacer(minLength: 0)
             }
             .padding(24)
@@ -206,7 +218,7 @@ struct FileDiffContainer: View {
                               onClose: { session.selectedFile = nil })
                 FileDiffView(file: file, layout: $layout, selection: $selection, fontSize: fontSize,
                          focusLine: session.selectedLines?.lowerBound,
-                         comments: model.comments.filter { $0.path == file.path },
+                         comments: model.commentsByPath[file.path] ?? [],
                          findings: session.data.findings.filter { $0.file == file.path },
                          onFocused: { session.selectedLines = nil },
                          onAsk: onAsk,
@@ -466,6 +478,131 @@ struct CommentsButton: View {
                   : "Show all review comments (⇧⌘C)")
             .accessibilityLabel("Show all review comments")
         }
+    }
+}
+
+/// The walkthrough's opening paragraph and the worst findings, if either
+/// exists — the overview had two-thirds of a tall window doing nothing, and
+/// this is the state a reviewer returning to a PR actually wants.
+struct OverviewDigest: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var session: ReviewSession
+
+    private var openFindings: [Finding] {
+        session.data.findings
+            .filter { !$0.dismissed }
+            .sorted { $0.severityRank == $1.severityRank ? $0.file < $1.file : $0.severityRank < $1.severityRank }
+    }
+
+    var body: some View {
+        let explanation = session.data.explanation
+        let findings = openFindings
+        if explanation != nil || !findings.isEmpty {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                Divider()
+                if let e = explanation, !e.summary.isEmpty {
+                    card(title: "Walkthrough", systemImage: "sparkles",
+                         action: "Open", onOpen: { Task { await model.explainDiff() } }) {
+                        Text(e.summary)
+                            .font(Typography.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if !findings.isEmpty {
+                    card(title: "Findings", systemImage: "checklist",
+                         action: findings.count > 3 ? "All \(findings.count)" : "Open",
+                         onOpen: { Task { await model.review() } }) {
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            ForEach(findings.prefix(3)) { finding in
+                                Button {
+                                    session.selectedLines = finding.line...finding.line
+                                    session.selectedFile = finding.file
+                                    session.pane = .diff
+                                } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
+                                        SeverityChip(severity: finding.severity)
+                                        Text(finding.explanation)
+                                            .font(Typography.body)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        Spacer(minLength: 0)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Open \(finding.file):\(finding.line)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func card<Content: View>(
+        title: String, systemImage: String, action: String,
+        onOpen: @escaping () -> Void, @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: systemImage).imageScale(.small)
+                Text(title)
+                Spacer()
+                Button(action, action: onOpen)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .font(.callout)
+            }
+            .font(Typography.sectionTitle)
+            .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: Radius.lg))
+        .overlay {
+            RoundedRectangle(cornerRadius: Radius.lg)
+                .strokeBorder(Palette.cardBorder)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Review state beside the comment and commit counts, so the pane has a way in
+/// from the page you land on rather than only the View menu and the side panel.
+struct FindingsButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var session: ReviewSession
+
+    var body: some View {
+        let open = session.data.findings.filter { !$0.dismissed }
+        let reviewed = session.data.reviewStamp != nil
+        Button {
+            Task { await model.review() }
+        } label: {
+            HStack(spacing: Spacing.xs) {
+                Image(systemName: reviewed && open.isEmpty ? "checkmark.seal" : "checklist")
+                if reviewed {
+                    Text(verbatim: open.isEmpty ? "clean" : "\(open.count)")
+                        .monospacedDigit()
+                    if let worst = open.map(\.severityRank).min(), worst == 0 {
+                        Text("high").foregroundStyle(Palette.removed)
+                    }
+                } else {
+                    Text("Review")
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(reviewed && open.isEmpty
+                         ? AnyShapeStyle(Palette.added) : AnyShapeStyle(.secondary))
+        .disabled(!session.agentState.canStart && !reviewed)
+        .help(reviewed ? "Show review findings (\u{21E7}\u{2318}F)"
+                       : "Review this pull request (\u{21E7}\u{2318}F)")
+        .accessibilityLabel(reviewed ? "Show review findings" : "Review this pull request")
     }
 }
 

@@ -46,6 +46,7 @@ struct ExplainView: View {
             Spacer(minLength: Spacing.sm)
             if case .running(let label) = session.agentState, label == "Explaining" {
                 ProgressView().controlSize(.small)
+                if let started = controller.runStartedAt { ElapsedLabel(start: started) }
                 Button("Stop") { controller.cancel() }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)

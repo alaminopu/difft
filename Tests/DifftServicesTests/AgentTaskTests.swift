@@ -25,7 +25,7 @@ final class AgentTaskTests: XCTestCase {
     }
 
     func testReviewPromptAsksForJSONFindings() {
-        let task = AgentTask.review(pr: pr, diffSummary: "3 files changed")
+        let task = AgentTask.review(pr: pr, diffSummary: "3 files changed", fileCount: 3)
         XCTAssertTrue(task.prompt.contains("json"))
         XCTAssertTrue(task.prompt.contains("severity"))
         XCTAssertTrue(task.cliArguments.contains("Read,Grep,Glob"))
@@ -70,10 +70,26 @@ final class AgentTaskTests: XCTestCase {
     }
 
 
+    /// "Read enough around them to judge the change in context" is unbounded,
+    /// and on a 44-file PR it turned one pass into a quarter of an hour. Past
+    /// the threshold the pass has to spend its reading on breadth.
+    func testLargePRsGetABoundedReadingBudget() {
+        let small = AgentTask.review(pr: pr, diffSummary: "a.swift", fileCount: 3)
+        XCTAssertTrue(small.prompt.contains("small enough to read properly"))
+        XCTAssertFalse(small.prompt.contains("too many to read exhaustively"))
+
+        let big = AgentTask.review(pr: pr, diffSummary: "a.swift",
+                                   fileCount: AgentTask.wideReadingFileLimit + 1)
+        XCTAssertTrue(big.prompt.contains("too many to read exhaustively"))
+        XCTAssertTrue(big.prompt.contains("Do not survey the codebase"))
+        // A partial pass must say so rather than pass itself off as complete.
+        XCTAssertTrue(big.prompt.contains("partial pass"))
+    }
+
     /// The checkout is the PR's own content, CLAUDE.md included — a diff can
     /// add one in the same change being reviewed.
     func testPromptsTreatRepoContentAsData() {
-        for task in [AgentTask.review(pr: pr, diffSummary: "a"),
+        for task in [AgentTask.review(pr: pr, diffSummary: "a", fileCount: 1),
                      AgentTask.explain(pr: pr, diffSummary: "a"),
                      AgentTask.verifyFindings(pr: pr, candidates: [])] {
             let prompt = task.prompt.lowercased()

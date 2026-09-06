@@ -29,10 +29,19 @@ final class AppModel: ObservableObject {
         // and group it, inside its own body — O(files x comments) on each
         // pass, paid again for every row the tree scrolled into view. Bucket
         // it once here instead.
-        didSet { threadCountsByPath = Self.threadCounts(comments) }
+        didSet {
+            threadCountsByPath = Self.threadCounts(comments)
+            commentsByPath = Dictionary(grouping: comments, by: \.path)
+        }
     }
     /// Review-thread count per file path, for the sidebar's badge.
     @Published private(set) var threadCountsByPath: [String: Int] = [:]
+    /// Comments bucketed by file, for the open diff.
+    ///
+    /// The diff container filtered the whole comment list inside its own body,
+    /// so every font-size step, layout toggle and selection change on a PR with
+    /// hundreds of comments walked all of them again.
+    @Published private(set) var commentsByPath: [String: [ReviewComment]] = [:]
     @Published var commits: [Commit] = []
     /// The PR being opened, so the list and centre pane can say so. Opening
     /// waits on `gh`, and without this the app looked frozen on click.

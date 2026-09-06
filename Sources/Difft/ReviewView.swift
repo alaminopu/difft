@@ -73,6 +73,7 @@ struct ReviewView: View {
                 Spacer(minLength: Spacing.sm)
                 if isRunning {
                     ProgressView().controlSize(.small)
+                    if let started = controller.runStartedAt { ElapsedLabel(start: started) }
                     Button("Stop") { controller.cancel() }
                         .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.callout)
                 } else if session.data.reviewStamp != nil {
@@ -371,5 +372,23 @@ struct SeverityChip: View {
             .foregroundStyle(Self.color(for: severity))
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Self.color(for: severity).opacity(0.18), in: Capsule())
+    }
+}
+
+/// Live elapsed time for a running agent pass.
+struct ElapsedLabel: View {
+    let start: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: start, by: 1)) { context in
+            Text(Self.format(context.date.timeIntervalSince(start)))
+                .font(Typography.metaDigits)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    static func format(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return total < 60 ? "\(total)s" : "\(total / 60)m \(total % 60)s"
     }
 }
