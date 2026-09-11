@@ -10,12 +10,96 @@ public struct PullRequest: Codable, Equatable, Identifiable, Sendable {
     /// Branch the PR merges into; optional so sessions saved before this
     /// field existed still decode.
     public let baseRefName: String?
+    /// The base branch's commit at the time GitHub was asked.
+    ///
+    /// Needed because `<remote>/<branch>` is the wrong base for a PR that has
+    /// already been merged: the branch now contains the PR, so the merge-base
+    /// is the head itself and the diff comes out empty.
+    public let baseRefOid: String?
     public let authorLogin: String
+    /// "OPEN", "CLOSED" or "MERGED". Optional for the same reason as
+    /// `baseRefName`: sessions written before the list could show anything but
+    /// open PRs have to keep decoding.
+    public let state: String?
+    public let isDraft: Bool?
+    /// ISO8601. Shown in the list the way GitHub and IntelliJ show it, so a
+    /// long-lived PR is recognisable without opening it.
+    public let createdAt: String?
+
     public init(number: Int, title: String, body: String, headRefName: String,
-                baseRefName: String? = nil, authorLogin: String) {
+                baseRefName: String? = nil, baseRefOid: String? = nil, authorLogin: String,
+                state: String? = nil, isDraft: Bool? = nil, createdAt: String? = nil) {
         self.number = number; self.title = title; self.body = body
         self.headRefName = headRefName; self.baseRefName = baseRefName
+        self.baseRefOid = baseRefOid
         self.authorLogin = authorLogin
+        self.state = state; self.isDraft = isDraft; self.createdAt = createdAt
+    }
+
+    /// Uppercase state, or "OPEN" for a PR fetched before the field existed.
+    public var stateLabel: String { (state ?? "OPEN").uppercased() }
+    public var isOpen: Bool { stateLabel == "OPEN" }
+}
+
+/// What the user typed into the pull-request search field.
+public enum PRSearchQuery {
+    /// A PR number the user typed: "6022", "#6022", or a GitHub URL ending in
+    /// one. nil when the query is words rather than a number.
+    public static func number(in query: String) -> Int? {
+        var text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let pull = text.range(of: "/pull/", options: .backwards) {
+            text = String(text[pull.upperBound...])
+        }
+        if text.hasPrefix("#") { text.removeFirst() }
+        // Trailing slash or fragment on a pasted URL.
+        while let last = text.last, last == "/" { text.removeLast() }
+        guard !text.isEmpty, text.count <= 12,
+              text.allSatisfy(\.isNumber), let n = Int(text), n > 0 else { return nil }
+        return n
+    }
+
+    /// A bare number is not handed to GitHub's text search — it would match
+    /// every PR whose body happens to mention that number. It is looked up
+    /// directly instead, and pinned to the top of the normal list.
+    public static func terms(in query: String) -> String {
+        number(in: query) == nil ? query : ""
+    }
+
+    /// The whole query GitHub is given: what the user typed, narrowed to the
+    /// authors they ticked.
+    ///
+    /// Several `author:` qualifiers side by side are ANDed, and no PR has two
+    /// authors — that combination always returns nothing. They have to be an
+    /// explicit OR, parenthesised so the text terms still apply to all of it.
+    public static func full(query: String, authors: [String]) -> String {
+        var parts: [String] = []
+        let text = terms(in: query).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { parts.append(text) }
+        let logins = Set(authors.map { $0.trimmingCharacters(in: .whitespaces) })
+            .filter { !$0.isEmpty }.sorted()
+        if logins.count == 1 {
+            parts.append("author:\(logins[0])")
+        } else if logins.count > 1 {
+            parts.append("(" + logins.map { "author:\($0)" }.joined(separator: " OR ") + ")")
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
+/// Which PRs the list asks GitHub for.
+///
+/// Open-only was the whole world until the list could search; searching for a
+/// number you remember usually means a PR that has already been merged.
+public enum PRScope: String, CaseIterable, Identifiable, Sendable {
+    case open, closed, merged, all
+    public var id: Self { self }
+    public var label: String {
+        switch self {
+        case .open: return "Open"
+        case .closed: return "Closed"
+        case .merged: return "Merged"
+        case .all: return "All"
+        }
     }
 }
 
@@ -107,23 +191,79 @@ public enum CommentBodySegment: Equatable, Sendable {
     }
 }
 
-public enum GitHubServiceError: Error, Equatable {
+public enum GitHubServiceError: Error, Equatable, LocalizedError {
     case commandFailed(String)
+
+    /// Without `LocalizedError`, `error.localizedDescription` throws away the
+    /// stderr this carries and every banner in the app read "The operation
+    /// couldn't be completed. (DifftServices.GitHubServiceError error 0.)" —
+    /// hiding the one thing worth showing, which is what GitHub said.
+    public var errorDescription: String? {
+        switch self {
+        case .commandFailed(let stderr):
+            let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return "gh command failed" }
+            // `gh` writes multi-line errors with the useful sentence last.
+            let lines = trimmed.split(separator: "\n").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+            return lines.suffix(2).joined(separator: " ")
+        }
+    }
 }
 
 public final class GitHubService: Sendable {
     private let runner: ProcessRunning
     public init(runner: ProcessRunning = DefaultProcessRunner()) { self.runner = runner }
 
-    public func listPRs(repoDir: URL) async throws -> [PullRequest] {
-        let r = try await runner.run("gh", arguments: ["pr", "list", "--json", "number,title,body,headRefName,baseRefName,author", "--limit", "50"], currentDirectory: repoDir)
+    /// Fields both the list and the single-PR lookup ask for, so the two
+    /// cannot drift into returning differently-populated PullRequests.
+    static let prFields = "number,title,body,headRefName,baseRefName,baseRefOid,author,state,isDraft,createdAt"
+
+    private struct RawPR: Codable {
+        struct Author: Codable { let login: String? }
+        let number: Int; let title: String; let body: String; let headRefName: String
+        let baseRefName: String?; let baseRefOid: String?; let author: Author?
+        let state: String?; let isDraft: Bool?; let createdAt: String?
+
+        var pullRequest: PullRequest {
+            PullRequest(number: number, title: title, body: body, headRefName: headRefName,
+                        baseRefName: baseRefName, baseRefOid: baseRefOid,
+                        // A PR opened by a deleted account has no login, and
+                        // decoding must not fail over an empty byline.
+                        authorLogin: author?.login ?? "",
+                        state: state, isDraft: isDraft, createdAt: createdAt)
+        }
+    }
+
+    /// Lists pull requests, optionally narrowed by GitHub's own search syntax.
+    ///
+    /// `search` is handed to GitHub rather than applied here: on a repository
+    /// with hundreds of PRs, filtering a locally-held page only ever searches
+    /// that page. Everything the user types — `payments`, `author:someone`,
+    /// `is:draft` — is a server-side query over the whole repository.
+    public func listPRs(repoDir: URL, scope: PRScope = .open,
+                        search: String = "", limit: Int = 100) async throws -> [PullRequest] {
+        var args = ["pr", "list", "--state", scope.rawValue,
+                    "--limit", String(max(1, limit)), "--json", Self.prFields]
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty { args += ["--search", query] }
+        let r = try await runner.run("gh", arguments: args, currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
-        struct Raw: Codable { struct Author: Codable { let login: String }
-            let number: Int; let title: String; let body: String; let headRefName: String
-            let baseRefName: String?; let author: Author }
-        let raws = try JSONDecoder().decode([Raw].self, from: Data(r.stdout.utf8))
-        return raws.map { PullRequest(number: $0.number, title: $0.title, body: $0.body, headRefName: $0.headRefName,
-                                      baseRefName: $0.baseRefName, authorLogin: $0.author.login) }
+        return try JSONDecoder().decode([RawPR].self, from: Data(r.stdout.utf8)).map(\.pullRequest)
+    }
+
+    /// One PR by number, whatever its state.
+    ///
+    /// Typing a number you remember is the most direct way to reach a PR, and
+    /// it has to work for a PR that was merged months ago and appears in no
+    /// list the app would otherwise fetch.
+    public func fetchPR(repoDir: URL, number: Int) async throws -> PullRequest {
+        let r = try await runner.run(
+            "gh", arguments: ["pr", "view", String(number), "--json", Self.prFields],
+            currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        return try JSONDecoder().decode(RawPR.self, from: Data(r.stdout.utf8)).pullRequest
     }
 
     public func fetchDiff(repoDir: URL, number: Int) async throws -> [FileDiff] {
@@ -221,13 +361,32 @@ public final class GitHubService: Sendable {
         return map
     }
 
-    public func replyToComment(repoDir: URL, number: Int, commentID: Int, body: String) async throws {
+    /// GitHub returns the comment it just created or changed. Decoding it lets
+    /// the caller update its own list instead of re-downloading every comment
+    /// on the PR — which was two `gh` processes per reply, edit or resolve.
+    private struct RawComment: Codable {
+        struct User: Codable { let login: String }
+        let id: Int; let user: User; let body: String; let path: String
+        let line: Int?; let side: String?; let created_at: String
+        let in_reply_to_id: Int?; let diff_hunk: String?
+
+        var comment: ReviewComment {
+            ReviewComment(id: id, author: user.login, body: body, path: path, line: line,
+                          side: side, createdAt: created_at, inReplyToID: in_reply_to_id,
+                          diffHunk: diff_hunk)
+        }
+    }
+
+    @discardableResult
+    public func replyToComment(repoDir: URL, number: Int, commentID: Int,
+                               body: String) async throws -> ReviewComment? {
         let r = try await runner.run("gh", arguments: [
             "api", "-X", "POST",
             "repos/{owner}/{repo}/pulls/\(number)/comments/\(commentID)/replies",
             "-f", "body=\(body)",
         ], currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        return try? JSONDecoder().decode(RawComment.self, from: Data(r.stdout.utf8)).comment
     }
 
     /// The signed-in login, so the UI can tell which comments are the user's
@@ -239,13 +398,16 @@ public final class GitHubService: Sendable {
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    public func updateComment(repoDir: URL, commentID: Int, body: String) async throws {
+    @discardableResult
+    public func updateComment(repoDir: URL, commentID: Int,
+                              body: String) async throws -> ReviewComment? {
         let r = try await runner.run("gh", arguments: [
             "api", "-X", "PATCH",
             "repos/{owner}/{repo}/pulls/comments/\(commentID)",
             "-f", "body=\(body)",
         ], currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        return try? JSONDecoder().decode(RawComment.self, from: Data(r.stdout.utf8)).comment
     }
 
     public func deleteComment(repoDir: URL, commentID: Int) async throws {
@@ -260,9 +422,10 @@ public final class GitHubService: Sendable {
     ///
     /// `commitID` must be the PR head the lines were read from; GitHub
     /// rejects a comment anchored to a commit the line numbers do not match.
+    @discardableResult
     public func createComment(repoDir: URL, number: Int, commitID: String,
                               path: String, line: Int, startLine: Int?,
-                              side: String = "RIGHT", body: String) async throws {
+                              side: String = "RIGHT", body: String) async throws -> ReviewComment? {
         var args = [
             "api", "-X", "POST",
             "repos/{owner}/{repo}/pulls/\(number)/comments",
@@ -279,6 +442,7 @@ public final class GitHubService: Sendable {
         }
         let r = try await runner.run("gh", arguments: args, currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        return try? JSONDecoder().decode(RawComment.self, from: Data(r.stdout.utf8)).comment
     }
 
     public func resolveThread(repoDir: URL, threadID: String) async throws {
@@ -287,6 +451,45 @@ public final class GitHubService: Sendable {
             "api", "graphql", "-f", "query=\(mutation)", "-f", "id=\(threadID)",
         ], currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+    }
+
+    /// Everyone who has contributed to the repository, most active first.
+    ///
+    /// The author filter cannot be built from the PRs currently on screen: on
+    /// a repository with two hundred engineers the page you are looking at
+    /// holds a handful of them, and the person you want is usually not one.
+    /// GitHub returns this sorted by commit count, which is the order a
+    /// picker wants anyway. Capped rather than paginated to exhaustion — past
+    /// a few hundred the list is a search box, not a list.
+    public func fetchContributors(repoDir: URL, limit: Int = 500) async throws -> [String] {
+        let r = try await runner.run("gh", arguments: [
+            "api", "repos/{owner}/{repo}/contributors?per_page=100",
+            "--paginate", "--jq", ".[].login",
+        ], currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        var seen = Set<String>()
+        var logins: [String] = []
+        for line in r.stdout.split(separator: "\n") {
+            let login = line.trimmingCharacters(in: .whitespaces)
+            guard !login.isEmpty, seen.insert(login).inserted else { continue }
+            logins.append(login)
+            if logins.count >= limit { break }
+        }
+        return logins
+    }
+
+    /// The git remote that points at the repository `gh` is talking to.
+    ///
+    /// In a fork checkout these are different repositories: `gh` resolves the
+    /// upstream it was configured with, while `origin` is the fork. Fetching
+    /// `pull/N/head` from the wrong one fails with "couldn't find remote ref",
+    /// which silently cost the full-context diff, the head SHA, and with it
+    /// the ability to comment. Falls back to "origin" when nothing matches.
+    public func remoteName(repoDir: URL, nameWithOwner: String) async -> String {
+        guard let r = try? await runner.run("git", arguments: ["remote", "-v"],
+                                            currentDirectory: repoDir),
+              r.exitCode == 0 else { return "origin" }
+        return GitRemotes.matching(nameWithOwner: nameWithOwner, in: r.stdout) ?? "origin"
     }
 
     public func checkAvailability() async -> (ghInstalled: Bool, ghAuthed: Bool) {

@@ -40,7 +40,11 @@ final class AgentController: ObservableObject {
         runStartedAt = Date()
         do {
             let wt = try await worktrees.ensureWorktree(
-                cloneDir: repoDir, repoName: model.repoName, prNumber: session.data.pr.number)
+                cloneDir: repoDir, repoName: model.repoName, prNumber: session.data.pr.number,
+                // In a fork checkout `origin` is the fork and the PR ref lives
+                // on the upstream `gh` resolves; fetching from the wrong one
+                // fails outright.
+                remote: await model.remoteName(repoDir: repoDir))
             try await body(wt)
             // Only clobber to `.idle` if nothing else already moved state on
             // — `consume()` may have set `.failed` from a result(is_error:
@@ -51,10 +55,8 @@ final class AgentController: ObservableObject {
             session.agentState = .afterFailure(userCancelled: userCancelled, message: "\(label): \(error.localizedDescription)")
         }
         runStartedAt = nil
-        do {
-            try model.sessionStore.save(session.data)
-        } catch {
-            model.errorBanner = "Failed to save session: \(error.localizedDescription)"
+        model.sessionStore.saveInBackground(session.data) { [weak model] error in
+            model?.errorBanner = "Failed to save session: \(error.localizedDescription)"
         }
     }
 
@@ -144,6 +146,9 @@ final class AgentController: ObservableObject {
                 "git", arguments: ["rev-parse", "HEAD"], currentDirectory: wt)
             let sha = head?.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             session.data.explanation = parsed.stamped(headSHA: (sha?.isEmpty ?? true) ? nil : sha)
+            // A new walkthrough asks new questions; keeping the old answers
+            // would show them already answered.
+            session.quizAnswers = [:]
         }
     }
 

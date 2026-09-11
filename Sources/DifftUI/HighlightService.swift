@@ -53,14 +53,26 @@ public final class HighlightService: ObservableObject {
     /// Setting a presentation intent does not reliably bold a run that already
     /// carries a concrete font — and Highlightr gives every run one — so the
     /// bold face is applied explicitly.
-    public var emphasisNSFont: NSFont {
+    /// Resolved once per theme/font change rather than per access.
+    ///
+    /// These were computed properties, read from `body` for every emphasis
+    /// range of every visible changed row — so a window resize ran a few
+    /// hundred `NSFontManager` trait conversions per frame, each of which is a
+    /// font-descriptor match.
+    public private(set) var emphasisNSFont: NSFont = CodeFont.resolve(
+        family: CodeFont.systemFamily, size: CGFloat(DiffMetrics.defaultFontSize))
+    public private(set) var emphasisFont: Font = Font(
+        CodeFont.resolve(family: CodeFont.systemFamily,
+                         size: CGFloat(DiffMetrics.defaultFontSize)) as CTFont)
+
+    private func resolveEmphasisFont() {
         let base = CodeFont.resolve(family: fontFamily, size: fontSize)
-        return NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+        emphasisNSFont = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
+        emphasisFont = Font(emphasisNSFont as CTFont)
     }
 
-    public var emphasisFont: Font { Font(emphasisNSFont as CTFont) }
-
     private func applyTheme() {
+        resolveEmphasisFont()
         // Palette must match the window background; a light-theme palette on a
         // dark window is unreadable.
         highlightr?.setTheme(to: theme.themeName(dark: isDark ?? true))
@@ -87,14 +99,23 @@ public final class HighlightService: ObservableObject {
         languagesByExtension[(path as NSString).pathExtension.lowercased()]
     }
 
+    /// Longest line handed to highlight.js.
+    ///
+    /// Highlighting is a synchronous JavaScriptCore call plus an HTML parse,
+    /// on the main actor, per line. A minified bundle or a generated lockfile
+    /// can hold a single line of hundreds of kilobytes, and one of those will
+    /// stall the window. Matches the cap the intraline diff already applies.
+    static let maxHighlightedLength = 2_000
+
     /// Highlight with language auto-detection (for markdown code blocks
     /// whose fence rarely names the language).
     public func highlightedAuto(_ text: String) -> AttributedString {
-        cached(key: "\u{1}auto\u{1}\(text)", text: text) { $0.highlight(text) }
+        guard text.count <= Self.maxHighlightedLength else { return plain(text) }
+        return cached(key: "\u{1}auto\u{1}\(text)", text: text) { $0.highlight(text) }
     }
 
     public func highlighted(_ text: String, language: String?) -> AttributedString {
-        guard let language else { return plain(text) }
+        guard let language, text.count <= Self.maxHighlightedLength else { return plain(text) }
         return cached(key: "\(language)\u{1}\(text)", text: text) { $0.highlight(text, as: language) }
     }
 

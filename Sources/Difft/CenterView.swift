@@ -127,7 +127,13 @@ struct PROverviewView: View {
                     CommitsButton(session: session)
                     FindingsButton(session: session)
                     Spacer()
-                    if let note = model.refreshNote {
+                    if let note = model.worktreeNote {
+                        Label(note, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(2)
+                            .help(note)
+                    } else if let note = model.refreshNote {
                         Text(note)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -274,6 +280,8 @@ struct MainSplitView: View {
     @AppStorage("showRightPanel") private var showRightPanel = false
 
     @AppStorage("rightPanelTab") private var panelTab = 0
+    /// Deleting every checkout is not undoable and takes no time to confirm.
+    @State private var confirmingClean = false
 
     var body: some View {
         NavigationSplitView {
@@ -308,7 +316,17 @@ struct MainSplitView: View {
                 }
                 Divider()
                 ToolStrip(showPanel: $showRightPanel, tab: $panelTab,
-                          onReport: generateReport, onClean: cleanWorktrees)
+                          onReport: generateReport, onClean: { confirmingClean = true })
+            }
+            .confirmationDialog("Delete cached pull-request checkouts?",
+                                isPresented: $confirmingClean, titleVisibility: .visible) {
+                Button("Delete them", role: .destructive) { cleanWorktrees() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Removes every PR checkout under Application Support, freeing the disk "
+                     + "they use. The PR you have open is kept. Anything else is re-fetched "
+                     + "the next time you open it — including any fix Claude wrote and you "
+                     + "have not saved elsewhere.")
             }
             // ⌥⌘0 still toggles the panel; the visible toggle lives in the strip.
             .background(
@@ -335,9 +353,20 @@ struct MainSplitView: View {
 
     private func cleanWorktrees() {
         let baseDir = AppModel.appSupportDir.appendingPathComponent("worktrees")
-        Task.detached(priority: .utility) {
-            try? WorktreeManager(runner: DefaultProcessRunner(), baseDir: baseDir)
-                .prune(olderThan: 0)
+        // The open PR's checkout is spared: deleting it left the diff on
+        // screen working while every commit in it failed to load.
+        let keep = model.session.map {
+            baseDir.appendingPathComponent("\(model.repoName)-pr\($0.data.pr.number)")
+        }
+        Task {
+            let removed = await Task.detached(priority: .utility) { () -> Int in
+                (try? WorktreeManager(runner: DefaultProcessRunner(), baseDir: baseDir)
+                    .prune(olderThan: 0, keeping: keep)) ?? 0
+            }.value
+            // Silence looked like nothing had happened.
+            model.refreshNote = removed == 0
+                ? "No cached checkouts to delete"
+                : "Deleted \(removed) cached checkout\(removed == 1 ? "" : "s")"
         }
     }
 }
@@ -454,8 +483,8 @@ struct CommentsButton: View {
         if model.isLoadingDetails {
             ProgressView().controlSize(.small)
         } else {
-            let threads = CommentThread.group(model.comments)
-            let unresolved = threads.count { !$0.resolved }
+            let threads = model.threads
+            let unresolved = model.unresolvedThreadCount
             Button {
                 model.closeCommit()
                 session.pane = .comments

@@ -69,6 +69,12 @@ public enum Typography {
 public enum Palette {
     // Surfaces
     public static let surface = Color.primary.opacity(0.04)
+    /// Opaque, unlike every other surface here.
+    ///
+    /// A popover's own backing is translucent, so content laid on it reads
+    /// through to whatever the window is showing underneath — names over a
+    /// list of pull requests. Anything floating over the window needs this.
+    public static let floating = Color(nsColor: .controlBackgroundColor)
     public static let surfaceRaised = Color.primary.opacity(0.07)
     public static let hairline = Color.primary.opacity(0.08)
     public static let cardBorder = Color.primary.opacity(0.08)

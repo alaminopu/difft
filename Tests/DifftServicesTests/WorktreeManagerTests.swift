@@ -83,23 +83,100 @@ final class WorktreeManagerTests: XCTestCase {
 
         let fake = FakeProcessRunner()
         fake.responses = [
-            ProcessResult(stdout: "", stderr: "", exitCode: 0),            // fetch
-            ProcessResult(stdout: "", stderr: "", exitCode: 0),            // reset --hard
-            ProcessResult(stdout: "abc1234def\n", stderr: "", exitCode: 0), // rev-parse
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // fetch
+            ProcessResult(stdout: "abc1234def\n", stderr: "", exitCode: 0),  // rev-parse FETCH_HEAD
+            ProcessResult(stdout: "0000000000\n", stderr: "", exitCode: 0),  // rev-parse HEAD
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // status: clean
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // reset --hard
+            ProcessResult(stdout: "abc1234def\n", stderr: "", exitCode: 0),  // rev-parse HEAD
         ]
         let mgr = WorktreeManager(runner: fake, baseDir: dir)
         let head = try await mgr.refreshWorktree(
             cloneDir: URL(fileURLWithPath: "/tmp/clone"), repoName: "repo", prNumber: 9)
 
         XCTAssertEqual(head, "abc1234def")
-        // Existing worktree: no prune/add, straight to fetch + reset + rev-parse.
-        // Fetch runs in the worktree with no destination branch (git refuses
-        // to fetch into a checked-out branch), then reset moves it.
+        // Existing worktree: no prune/add. Fetch runs in the worktree with no
+        // destination branch (git refuses to fetch into a checked-out branch),
+        // then reset moves it — but only after checking the head actually
+        // moved and that nothing uncommitted would be destroyed.
         XCTAssertEqual(fake.calls.map(\.arguments), [
             ["fetch", "origin", "pull/9/head"],
+            ["rev-parse", "FETCH_HEAD"],
+            ["rev-parse", "HEAD"],
+            ["status", "--porcelain", "--untracked-files=no"],
             ["reset", "--hard", "FETCH_HEAD"],
             ["rev-parse", "HEAD"],
         ])
+    }
+
+    /// The PR has not moved, so there is nothing to reset to — and resetting
+    /// anyway is how re-opening a PR used to wipe an applied fix out of the
+    /// checkout.
+    func testRefreshSkipsTheResetWhenTheHeadHasNotMoved() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let target = dir.appendingPathComponent("repo-pr9")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),
+            ProcessResult(stdout: "same\n", stderr: "", exitCode: 0),  // FETCH_HEAD
+            ProcessResult(stdout: "same\n", stderr: "", exitCode: 0),  // HEAD
+        ]
+        let mgr = WorktreeManager(runner: fake, baseDir: dir)
+        let head = try await mgr.refreshWorktree(
+            cloneDir: URL(fileURLWithPath: "/tmp/clone"), repoName: "repo", prNumber: 9)
+
+        XCTAssertEqual(head, "same")
+        XCTAssertFalse(fake.calls.contains { $0.arguments.first == "reset" })
+    }
+
+    /// New commits exist, but so do uncommitted edits — the agent's "Fix it"
+    /// writes exactly those, and promises they are the user's to review.
+    func testRefreshRefusesToResetOverUncommittedWork() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let target = dir.appendingPathComponent("repo-pr9")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),
+            ProcessResult(stdout: "newhead\n", stderr: "", exitCode: 0),
+            ProcessResult(stdout: "oldhead\n", stderr: "", exitCode: 0),
+            ProcessResult(stdout: " M src/a.swift\n", stderr: "", exitCode: 0),
+        ]
+        let mgr = WorktreeManager(runner: fake, baseDir: dir)
+        do {
+            _ = try await mgr.refreshWorktree(
+                cloneDir: URL(fileURLWithPath: "/tmp/clone"), repoName: "repo", prNumber: 9)
+            XCTFail("expected localChanges")
+        } catch {
+            XCTAssertEqual(error as? WorktreeError, .localChanges)
+        }
+        XCTAssertFalse(fake.calls.contains { $0.arguments.first == "reset" })
+    }
+
+    /// A fork checkout's `origin` is the fork; the PR ref lives on the remote
+    /// `gh` resolves, and fetching from the wrong one fails outright.
+    func testRefreshFetchesFromTheNamedRemote() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let target = dir.appendingPathComponent("repo-pr9")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),
+            ProcessResult(stdout: "a\n", stderr: "", exitCode: 0),
+            ProcessResult(stdout: "a\n", stderr: "", exitCode: 0),
+        ]
+        let mgr = WorktreeManager(runner: fake, baseDir: dir)
+        _ = try await mgr.refreshWorktree(
+            cloneDir: URL(fileURLWithPath: "/tmp/clone"), repoName: "repo", prNumber: 9,
+            remote: "upstream")
+        XCTAssertEqual(fake.calls[0].arguments, ["fetch", "upstream", "pull/9/head"])
     }
 
     func testRefreshWorktreeThrowsWhenFetchFails() async {

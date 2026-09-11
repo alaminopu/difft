@@ -22,7 +22,7 @@ struct PRCommentsView: View {
     @State private var filter: Filter = .all
     @State private var search = ""
 
-    private var threads: [CommentThread] { CommentThread.group(model.comments) }
+    private var threads: [CommentThread] { model.threads }
 
     private var visibleThreads: [CommentThread] {
         let term = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -42,10 +42,10 @@ struct PRCommentsView: View {
 
     /// File path with its threads, in the order `CommentThread.group` sorted
     /// them, so the list matches the file tree's ordering.
-    private var byFile: [(path: String, threads: [CommentThread])] {
+    private func byFile(_ visible: [CommentThread]) -> [(path: String, threads: [CommentThread])] {
         var order: [String] = []
         var grouped: [String: [CommentThread]] = [:]
-        for thread in visibleThreads {
+        for thread in visible {
             if grouped[thread.path] == nil { order.append(thread.path) }
             grouped[thread.path, default: []].append(thread)
         }
@@ -53,6 +53,10 @@ struct PRCommentsView: View {
     }
 
     var body: some View {
+        // Bound once. As a computed property this ran four times per pass, and
+        // each run lowercases every comment body on the PR — so every
+        // keystroke in the search field walked the whole corpus four times.
+        let visible = visibleThreads
         VStack(spacing: 0) {
             header
             Divider()
@@ -61,20 +65,20 @@ struct PRCommentsView: View {
                                        systemImage: "bubble.left.and.bubble.right",
                                        description: Text("Nobody has commented on this pull request yet."))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if visibleThreads.isEmpty {
+            } else if visible.isEmpty {
                 ContentUnavailableView("Nothing matches",
                                        systemImage: "line.3.horizontal.decrease.circle",
                                        description: Text("No comment matches the current filter or search."))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                list
+                list(byFile(visible))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
-        let unresolved = threads.count { !$0.resolved }
+        let unresolved = model.unresolvedThreadCount
         return VStack(spacing: 8) {
             HStack(spacing: 10) {
                 OverviewBackButton()
@@ -136,11 +140,11 @@ struct PRCommentsView: View {
         .background(.bar)
     }
 
-    private var list: some View {
+    private func list(_ groups: [(path: String, threads: [CommentThread])]) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20, pinnedViews: [.sectionHeaders]) {
-                    ForEach(byFile, id: \.path) { group in
+                    ForEach(groups, id: \.path) { group in
                         Section {
                             ForEach(group.threads) { thread in
                                 CommentThreadCard(thread: thread) {
@@ -157,14 +161,21 @@ struct PRCommentsView: View {
                 .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .onAppear {
-                guard let target = session.commentsScrollTarget else { return }
-                session.commentsScrollTarget = nil
-                // The section only exists once its file survives the filter.
-                guard byFile.contains(where: { $0.path == target }) else { return }
-                proxy.scrollTo(target, anchor: .top)
-            }
+            .onAppear { scrollToTarget(proxy, groups) }
+            // Also on change: the sidebar's per-file badge stays clickable
+            // while this pane is open, and applying the target only on appear
+            // meant every badge after the first did nothing at all.
+            .onChange(of: session.commentsScrollTarget) { _, _ in scrollToTarget(proxy, groups) }
         }
+    }
+
+    private func scrollToTarget(_ proxy: ScrollViewProxy,
+                                _ groups: [(path: String, threads: [CommentThread])]) {
+        guard let target = session.commentsScrollTarget else { return }
+        session.commentsScrollTarget = nil
+        // The section only exists once its file survives the filter.
+        guard groups.contains(where: { $0.path == target }) else { return }
+        proxy.scrollTo(target, anchor: .top)
     }
 
     private func fileHeader(path: String, count: Int) -> some View {

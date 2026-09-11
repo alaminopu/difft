@@ -84,10 +84,7 @@ struct ExplainView: View {
     /// seconds" — future tense, and a rounding artefact of the run's own
     /// duration. Below a minute there is nothing useful to say but "just now".
     static func age(of date: Date, now: Date = Date()) -> String {
-        if now.timeIntervalSince(date) < 60 { return "just now" }
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .full
-        return f.localizedString(for: date, relativeTo: now)
+        Dates.since(date, now: now)
     }
 
     private func isStale(_ e: DiffExplanation) -> Bool {
@@ -238,7 +235,7 @@ struct ExplainView: View {
                              + "If one of these is a guess, go back to the diff.")
                             .font(Typography.meta).foregroundStyle(.secondary)
                         ForEach(Array(e.quiz.enumerated()), id: \.offset) { index, q in
-                            QuizCard(index: index + 1, question: q)
+                            QuizCard(index: index + 1, question: q, session: session)
                         }
                     }
                 }
@@ -449,7 +446,9 @@ private struct RiskRow: View {
 private struct QuizCard: View {
     let index: Int
     let question: QuizQuestion
-    @State private var picked: Int?
+    @ObservedObject var session: ReviewSession
+
+    private var picked: Int? { session.quizAnswers[index] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -468,7 +467,7 @@ private struct QuizCard: View {
                 Button {
                     // First answer stands. Letting it be changed after the
                     // reveal turns a check on yourself into a guessing game.
-                    if picked == nil { picked = i }
+                    if picked == nil { session.quizAnswers[index] = i }
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
                         Image(systemName: marker(for: i))

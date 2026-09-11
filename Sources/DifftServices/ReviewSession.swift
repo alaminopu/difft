@@ -160,6 +160,14 @@ public final class ReviewSession: ObservableObject {
     /// File whose section the comments list should scroll to when it opens,
     /// set when the list is entered from a particular file.
     @Published public var commentsScrollTarget: String?
+    /// Answers given to the walkthrough's comprehension gate, keyed by the
+    /// question's position.
+    ///
+    /// Held here rather than in the card's own `@State` because the Explain
+    /// pane is torn down whenever the centre pane changes — clicking an anchor
+    /// to go and check the code wiped every answer, and made them re-answerable,
+    /// which defeats the point of a check you only get one go at.
+    @Published public var quizAnswers: [Int: Int] = [:]
     @Published public var agentState: AgentState = .idle
     public init(data: SessionData) { self.data = data }
     public func snapshot() -> SessionData { data }

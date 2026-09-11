@@ -211,6 +211,9 @@ struct AgentStatusView: View {
     // Lives in the always-mounted status bar, so it is the reliable place to
     // pop the (default-hidden) assistant panel open when results land.
     @AppStorage("showRightPanel") private var showRightPanel = false
+    /// The PR whose findings this view is tracking, so a count that changed
+    /// because the session changed is not read as a run finishing.
+    @State private var openFor: Int?
 
     var body: some View {
         Group {
@@ -224,9 +227,16 @@ struct AgentStatusView: View {
             default: EmptyView()
             }
         }
-        .onChange(of: session.data.findings.count) { _, n in
-            if n > 0 { showRightPanel = true }
+        // Only when a run just produced them. This view sits in the
+        // always-mounted status bar, so switching PRs compares the outgoing
+        // session's count with the incoming one's — opening a PR that already
+        // had findings saved forced the panel open as if a review had landed.
+        .onChange(of: session.data.findings.count) { old, new in
+            guard new > old, session.data.pr.number == openFor else { return }
+            showRightPanel = true
         }
+        .onAppear { openFor = session.data.pr.number }
+        .onChange(of: session.data.pr.number) { _, number in openFor = number }
     }
 }
 

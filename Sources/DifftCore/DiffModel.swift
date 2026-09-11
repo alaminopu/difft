@@ -58,9 +58,14 @@ public struct FileDiff: Equatable, Identifiable, Sendable {
     /// Widest line number the gutter has to show, so its width can be derived
     /// from the file rather than guessed at a fixed size.
     public let maxLineNumber: Int
+    /// `.gitattributes` marks this file as generated, or suppresses its diff.
+    /// The content is shown either way — the flag only lets the UI say so, and
+    /// lets a reader skip 4,000 lines of lockfile with a clear conscience.
+    public let isGenerated: Bool
 
-    public init(path: String, kind: FileChangeKind, hunks: [Hunk]) {
+    public init(path: String, kind: FileChangeKind, hunks: [Hunk], isGenerated: Bool = false) {
         self.path = path; self.kind = kind; self.hunks = hunks
+        self.isGenerated = isGenerated
         var adds = 0, dels = 0, maxLine = 0
         for hunk in hunks {
             for line in hunk.lines {
@@ -73,5 +78,20 @@ public struct FileDiff: Equatable, Identifiable, Sendable {
             }
         }
         self.additions = adds; self.deletions = dels; self.maxLineNumber = maxLine
+    }
+
+    /// The same file with different content — used when a first pass produced
+    /// no patch (git had the diff driver turned off for the path) and a second,
+    /// forced-text pass produced the real one.
+    public func replacingHunks(_ hunks: [Hunk], kind: FileChangeKind? = nil,
+                               isGenerated: Bool? = nil) -> FileDiff {
+        FileDiff(path: path, kind: kind ?? self.kind, hunks: hunks,
+                 isGenerated: isGenerated ?? self.isGenerated)
+    }
+
+    /// Same file, only the generated flag changed.
+    public func marking(generated: Bool) -> FileDiff {
+        generated == isGenerated ? self : FileDiff(path: path, kind: kind, hunks: hunks,
+                                                   isGenerated: generated)
     }
 }

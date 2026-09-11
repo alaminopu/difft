@@ -30,10 +30,22 @@ struct ReviewView: View {
     private var visible: [Finding] {
         findings.filter { severityFilter.matches($0) && (showDismissed || !$0.dismissed) }
     }
-    private var isRunning: Bool {
-        if case .running(let label) = session.agentState { return label == "Reviewing" || label == "Verifying" }
-        return false
+    private var runningLabel: String? {
+        if case .running(let label) = session.agentState { return label }
+        return nil
     }
+
+    /// A review pass specifically — it is what the empty pane waits on.
+    private var isReviewing: Bool {
+        runningLabel == "Reviewing" || runningLabel == "Verifying"
+    }
+
+    /// Any run started from this pane, "Fixing" included.
+    ///
+    /// Fix runs used to show nothing at all: the buttons greyed out, and
+    /// minutes later the answer appeared in a chat panel that is hidden by
+    /// default. There was also no way to stop one.
+    private var isBusy: Bool { runningLabel != nil }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,8 +83,11 @@ struct ReviewView: View {
                         .font(Typography.meta).foregroundStyle(.tertiary).lineLimit(1)
                 }
                 Spacer(minLength: Spacing.sm)
-                if isRunning {
+                if isBusy {
                     ProgressView().controlSize(.small)
+                    if let label = runningLabel {
+                        Text(label).font(.callout).foregroundStyle(.secondary)
+                    }
                     if let started = controller.runStartedAt { ElapsedLabel(start: started) }
                     Button("Stop") { controller.cancel() }
                         .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.callout)
@@ -128,7 +143,7 @@ struct ReviewView: View {
     // MARK: - Body
 
     @ViewBuilder private var content: some View {
-        if isRunning && findings.isEmpty {
+        if isReviewing && findings.isEmpty {
             running
         } else if findings.isEmpty {
             empty

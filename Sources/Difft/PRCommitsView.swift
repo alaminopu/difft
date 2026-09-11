@@ -154,14 +154,7 @@ struct PRCommitsView: View {
 
     /// "5 September 2026" for the commit's authored day, or the raw string
     /// when the date will not parse — better a stray header than a crash.
-    static func dayLabel(for iso: String) -> String {
-        let parser = ISO8601DateFormatter()
-        guard let date = parser.date(from: iso) else { return iso }
-        let out = DateFormatter()
-        out.dateStyle = .long
-        out.timeStyle = .none
-        return out.string(from: date)
-    }
+    static func dayLabel(for iso: String) -> String { Dates.day(iso: iso) }
 }
 
 /// One commit: sha, subject, who and when, and its message body on demand.
@@ -173,12 +166,7 @@ struct CommitRow: View {
     var onOpen: () -> Void = {}
     @State private var hovering = false
 
-    private var age: String {
-        guard let date = ISO8601DateFormatter().date(from: commit.date) else { return "" }
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return rel.localizedString(for: date, relativeTo: Date())
-    }
+    private var age: String { Dates.age(iso: commit.date) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

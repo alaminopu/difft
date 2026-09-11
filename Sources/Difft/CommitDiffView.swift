@@ -18,12 +18,7 @@ struct CommitDiffView: View {
     @State private var selection: LineSelection?
     @AppStorage(PrefKey.diffFontSize) private var fontSize = DiffMetrics.defaultFontSize
 
-    private var age: String {
-        guard let date = ISO8601DateFormatter().date(from: commit.date) else { return "" }
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return rel.localizedString(for: date, relativeTo: Date())
-    }
+    private var age: String { Dates.age(iso: commit.date) }
 
     var body: some View {
         VStack(spacing: 0) {

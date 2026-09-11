@@ -88,4 +88,29 @@ extension CommitReferenceTests {
         let url = try XCTUnwrap(CommitReference.url(sha: sha))
         XCTAssertEqual(CommitReference.sha(from: url), sha)
     }
+    /// A PR description and a review comment are markdown the author writes,
+    /// and `[x](difft-commit://c/--output=f)` produces this scheme just as
+    /// well as a real reference does. The token used to be handed straight to
+    /// `git show`, where a leading `-` is an option rather than a revision.
+    func testOnlyHexSHAsAreAcceptedFromALink() throws {
+        let good = try XCTUnwrap(URL(string: "difft-commit://commit/d59f520cc"))
+        XCTAssertEqual(CommitReference.sha(from: good), "d59f520cc")
+
+        for hostile in ["difft-commit://c/--output=pwned",
+                        "difft-commit://c/-n",
+                        "difft-commit://c/..",
+                        "difft-commit://c/HEAD",
+                        "difft-commit://c/d59f520cc;rm",
+                        // Too short to be an abbreviation git would accept.
+                        "difft-commit://c/abc",
+                        "difft-commit://c/"] {
+            let url = try XCTUnwrap(URL(string: hostile))
+            XCTAssertNil(CommitReference.sha(from: url), hostile)
+        }
+
+        // Ordinary links stay the system's business.
+        let web = try XCTUnwrap(URL(string: "https://example.com/d59f520cc"))
+        XCTAssertNil(CommitReference.sha(from: web))
+    }
+
 }

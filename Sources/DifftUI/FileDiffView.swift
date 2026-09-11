@@ -23,19 +23,21 @@ public struct FileDiffView: View {
     // globally (not per file) so it survives file switches and relaunches.
     @AppStorage("diffSplitFraction") private var split = 0.5
 
-    fileprivate enum DiffItem: Identifiable, Sendable {
-        case hunkHeader(index: Int, text: String)
-        case row(SideBySideRow)
-        case comment(ReviewComment)
-        case finding(Finding)
-        var id: String {
-            switch self {
-            case .hunkHeader(let i, _): return "h\(i)"
-            case .row(let r): return "r\(r.id)"
-            case .comment(let c): return "c\(c.id)"
-            case .finding(let f): return "f\(f.id)"
-            }
+    fileprivate struct DiffItem: Identifiable, Sendable {
+        enum Kind: Sendable {
+            case hunkHeader(index: Int, text: String)
+            case row(SideBySideRow)
+            case comment(ReviewComment)
+            case finding(Finding)
         }
+        /// Assigned once while building.
+        ///
+        /// This was a computed `String` — `"r\(row.id)"` and friends — and
+        /// `ForEach` materialises an id for every element to maintain identity,
+        /// lazy rendering or not. On a full-context diff that is one heap
+        /// allocation per line of the file on every structural update.
+        let id: Int
+        let kind: Kind
     }
 
     fileprivate struct Built: Sendable {
@@ -71,6 +73,9 @@ public struct FileDiffView: View {
     /// Line range a new comment is being written against, nil when not
     /// composing.
     @State private var composing: CommentTarget?
+    /// A short explanation for an action that could not proceed, shown at the
+    /// top of the diff and dismissed by the reader or the next file.
+    @State private var notice: String?
 
     public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
     public var onResolveComment: (ReviewComment) -> Void = { _ in }
@@ -110,38 +115,69 @@ public struct FileDiffView: View {
         // header is noise there.
         let fullFile = file.hunks.count == 1
             && (file.hunks[0].lines.first.flatMap { $0.oldNumber ?? $0.newNumber } ?? 0) <= 1
+        var uid = 0
+        func next() -> Int { defer { uid += 1 }; return uid }
+
         for (i, hunk) in file.hunks.enumerated() {
-            if !fullFile { items.append(.hunkHeader(index: i, text: hunk.header)) }
+            if !fullFile { items.append(DiffItem(id: next(), kind: .hunkHeader(index: i, text: hunk.header))) }
             let local = sideBySide ? RowPairer.rows(for: [hunk]) : RowPairer.unifiedRows(for: [hunk])
             for r in local {
-                let remapped = SideBySideRow(id: base + r.id, left: r.left, right: r.right)
-                items.append(.row(remapped))
+                // `counterpart` has to survive the id remap: without it
+                // `emphasisPair` always returned nil and word-level emphasis
+                // silently never rendered in unified layout.
+                let remapped = SideBySideRow(id: base + r.id, left: r.left, right: r.right,
+                                             counterpart: r.counterpart)
+                items.append(DiffItem(id: next(), kind: .row(remapped)))
                 rows.append(remapped)
             }
             base += local.count
         }
-        // Anchor review comments under their row: LEFT comments match old
-        // line numbers, RIGHT (the default) match new ones. Outdated comments
-        // with no line are skipped.
+
+        // Line-number indexes, built once.
+        //
+        // Anchoring used to scan every row for each comment and then every
+        // item for that row's id — allocating a String per item it compared —
+        // and then shift the array to insert. Twenty comments on a ten-thousand
+        // line file was a few hundred thousand allocations before the diff
+        // could appear.
+        var rowByNewLine: [Int: Int] = [:]      // line -> row id
+        var rowByOldLine: [Int: Int] = [:]      // line -> row id, either side
+        var rowByLeftOldLine: [Int: Int] = [:]  // line -> row id, old side only
+        for r in rows {
+            if let n = r.right?.newNumber { rowByNewLine[n] = rowByNewLine[n] ?? r.id }
+            if let n = r.left?.newNumber { rowByNewLine[n] = rowByNewLine[n] ?? r.id }
+            if let o = r.left?.oldNumber {
+                rowByOldLine[o] = rowByOldLine[o] ?? r.id
+                rowByLeftOldLine[o] = rowByLeftOldLine[o] ?? r.id
+            }
+            if let o = r.right?.oldNumber { rowByOldLine[o] = rowByOldLine[o] ?? r.id }
+        }
+
+        // Findings first, then comments: a defect outranks a conversation.
+        var attachments: [Int: [DiffItem]] = [:]
+        for finding in findings {
+            guard let rowID = rowByNewLine[finding.line] ?? rowByLeftOldLine[finding.line]
+            else { continue }
+            attachments[rowID, default: []].append(DiffItem(id: next(), kind: .finding(finding)))
+        }
+        // LEFT comments match old line numbers, RIGHT (the default) match new
+        // ones. Outdated comments with no line are skipped.
         for c in comments {
             guard let line = c.line else { continue }
-            let matches: (SideBySideRow) -> Bool = c.side == "LEFT"
-                ? { $0.left?.oldNumber == line || $0.right?.oldNumber == line }
-                : { $0.right?.newNumber == line || $0.left?.newNumber == line }
-            guard let row = rows.first(where: matches),
-                  let idx = items.firstIndex(where: { $0.id == "r\(row.id)" }) else { continue }
-            var insertAt = idx + 1
-            while insertAt < items.count, case .comment = items[insertAt] { insertAt += 1 }
-            items.insert(.comment(c), at: insertAt)
+            guard let rowID = (c.side == "LEFT" ? rowByOldLine[line] : rowByNewLine[line])
+            else { continue }
+            attachments[rowID, default: []].append(DiffItem(id: next(), kind: .comment(c)))
         }
-        // Findings anchor to the new-file line they name, and sit above any
-        // comments on that line — a defect outranks a conversation.
-        for finding in findings {
-            guard let row = rows.first(where: {
-                $0.right?.newNumber == finding.line || $0.left?.newNumber == finding.line
-            }) ?? rows.first(where: { $0.left?.oldNumber == finding.line }),
-                  let idx = items.firstIndex(where: { $0.id == "r\(row.id)" }) else { continue }
-            items.insert(.finding(finding), at: idx + 1)
+        if !attachments.isEmpty {
+            var merged: [DiffItem] = []
+            merged.reserveCapacity(items.count + attachments.values.reduce(0) { $0 + $1.count })
+            for item in items {
+                merged.append(item)
+                if case .row(let r) = item.kind, let extra = attachments[r.id] {
+                    merged.append(contentsOf: extra)
+                }
+            }
+            items = merged
         }
         // Runs of consecutive changed rows for the overview rail.
         var blocks: [ChangeBlock] = []
@@ -204,7 +240,7 @@ public struct FileDiffView: View {
                         let language = HighlightService.language(forPath: file.path)
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(built.items) { item in
-                                switch item {
+                                switch item.kind {
                                 case .hunkHeader(_, let text):
                                     HunkHeaderView(text: text, metrics: metrics)
                                 case .finding(let f):
@@ -228,17 +264,26 @@ public struct FileDiffView: View {
                                                 onContextCopy: { id in copyRows(rowID: id) },
                                                 onContextComment: onAddComment == nil
                                                     ? nil : { id in startComment(rowID: id) })
-                                        .id(item.id)
+                                        // Scroll targets address rows by id;
+                                        // only rendered rows pay for it.
+                                        .id("r\(row.id)")
                                         .background(GeometryReader { rowGeo in
-                                            Color.clear.preference(
-                                                key: RowFramesKey.self,
-                                                value: [row.id: rowGeo.frame(in: .named("diffSpace"))])
+                                            // Recorded straight into a plain
+                                            // (non-observable) store rather than
+                                            // through a PreferenceKey: the key
+                                            // allocated a one-entry dictionary
+                                            // per visible row and merged them
+                                            // on every scroll tick, and the
+                                            // frames are read only by the drag
+                                            // gesture's hit test.
+                                            rowFrames.record(
+                                                row.id, rowGeo.frame(in: .named("diffSpace")))
+                                            return Color.clear
                                         })
                                 }
                             }
                         }
                         .frame(width: contentW, alignment: .leading)
-                        .onPreferenceChange(RowFramesKey.self) { frames in rowFrames.frames = frames }
                     }
                     .coordinateSpace(name: "diffSpace")
                     // Mouse drag over rows extends the selection line by line
@@ -288,6 +333,10 @@ public struct FileDiffView: View {
                     // against an empty row set and silently did nothing. Apply
                     // it whenever the built rows (or the target) change.
                     .onChange(of: built.key, initial: true) { _, _ in
+                        // Another file, or another layout: the recorded row
+                        // frames describe rows that no longer exist.
+                        rowFrames.reset()
+                        notice = nil
                         guard !built.allRows.isEmpty else { return }
                         if focusLine != nil {
                             focusIfNeeded(proxy)
@@ -334,6 +383,12 @@ public struct FileDiffView: View {
                     ProgressView().controlSize(.small)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    if file.isGenerated { GeneratedFileBanner() }
+                    if let notice { NoticeBanner(text: notice) { self.notice = nil } }
+                }
+            }
         }
     }
 
@@ -356,7 +411,13 @@ public struct FileDiffView: View {
         let newLines = built.allRows
             .filter { sel.range.contains($0.id) }
             .compactMap { $0.right?.newNumber }
-        guard let low = newLines.min(), let high = newLines.max() else { return }
+        guard let low = newLines.min(), let high = newLines.max() else {
+            // Silently doing nothing read as a broken menu item. Say why: the
+            // selection is entirely lines that no longer exist.
+            notice = "GitHub anchors a comment to a line of the new file. "
+                + "This selection is only deleted lines."
+            return
+        }
         composing = CommentTarget(startLine: low, endLine: high)
     }
 
@@ -417,6 +478,67 @@ public struct FileDiffView: View {
 /// Markdown-ish body shared by chat messages and comment cards: prose with
 /// inline markdown, fenced code blocks monospaced and syntax-highlighted
 /// (language auto-detected).
+
+
+/// NSCache needs a class; AttributedString is a value type.
+private final class InlineRun {
+    let value: AttributedString
+    init(_ value: AttributedString) { self.value = value }
+}
+
+/// One line of explanation for something the app declined to do.
+///
+/// An action that quietly does nothing reads as a bug. This is the cheapest
+/// honest alternative: say what happened, and get out of the way.
+struct NoticeBanner: View {
+    let text: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: "info.circle").imageScale(.small)
+            Text(text)
+            Spacer(minLength: 0)
+            Button { dismiss() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+        }
+        .font(Typography.meta)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surfaceRaised)
+        .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
+}
+
+/// Says a file is machine-written, so a reader can skip it deliberately
+/// rather than wonder why 4,000 lines changed.
+///
+/// The diff is shown regardless. Files the repository excludes from diffs
+/// entirely (`-diff` in `.gitattributes`) used to reach this view as an
+/// unviewable "Binary file"; they are re-read as text upstream, and this is
+/// what says where the content came from.
+struct GeneratedFileBanner: View {
+    var body: some View {
+        HStack(spacing: Spacing.xs) {
+            Image(systemName: "gearshape.2").imageScale(.small)
+            Text("Generated file — marked in .gitattributes")
+            Spacer(minLength: 0)
+        }
+        .font(Typography.meta)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surfaceRaised)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Palette.hairline).frame(height: 1)
+        }
+    }
+}
+
 public struct MarkdownBodyView: View {
     public let text: String
     @EnvironmentObject var highlighter: HighlightService
@@ -469,6 +591,25 @@ extension MarkdownBodyView {
     /// matters in review comments, where half the sentence is identifiers.
     static func inline(_ markdown: String, codeFamily: String,
                        repoSlug: String? = nil) -> AttributedString {
+        // Every comment card, every chat message and the PR description all
+        // re-parse markdown from scratch inside `body`, and any change to the
+        // highlighter re-renders all of them at once. The parse does not
+        // depend on anything but these three values.
+        let key = "\(codeFamily)\u{1}\(repoSlug ?? "")\u{1}\(markdown)" as NSString
+        if let hit = inlineCache.object(forKey: key) { return hit.value }
+        let built = buildInline(markdown, codeFamily: codeFamily, repoSlug: repoSlug)
+        inlineCache.setObject(InlineRun(built), forKey: key)
+        return built
+    }
+
+    private static let inlineCache: NSCache<NSString, InlineRun> = {
+        let c = NSCache<NSString, InlineRun>()
+        c.countLimit = 600
+        return c
+    }()
+
+    private static func buildInline(_ markdown: String, codeFamily: String,
+                                    repoSlug: String?) -> AttributedString {
         guard var attr = try? AttributedString(
             markdown: markdown,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
@@ -499,10 +640,15 @@ extension MarkdownBodyView {
         // SHA against and nothing useful a link could do.
         guard repoSlug != nil else { return }
         let plain = String(attr.characters)
+        let ranges = CommitReference.ranges(in: plain)
+        guard !ranges.isEmpty else { return }
+        // Materialised once. Indexing it per match rebuilt the whole body as a
+        // [Character] array for every SHA mentioned.
+        let characters = Array(plain)
 
         // Applying links shifts nothing, but walking back to front keeps the
         // offsets valid regardless of how attribute runs get split.
-        for range in CommitReference.ranges(in: plain).reversed() {
+        for range in ranges.reversed() {
             guard let lo = attr.index(attr.startIndex, offsetByCharacters: range.lowerBound)
                     as AttributedString.Index?,
                   let hi = attr.index(attr.startIndex, offsetByCharacters: range.upperBound)
@@ -512,7 +658,7 @@ extension MarkdownBodyView {
                 $0.link != nil || $0.inlinePresentationIntent?.contains(.code) == true
             }) { continue }
 
-            let sha = String(Array(plain)[range])
+            let sha = String(characters[range])
             guard let url = CommitReference.url(sha: sha) else { continue }
             attr[lo..<hi].link = url
             attr[lo..<hi].font = CodeFont.swiftUIFont(family: codeFamily, size: 12)
@@ -520,6 +666,22 @@ extension MarkdownBodyView {
     }
 
     struct Chunk { let text: String; let isHeading: Bool }
+
+    /// The text after a leading `#`…`######` and at least one space, or nil.
+    ///
+    /// Was `range(of:options:.regularExpression)`, which compiles an
+    /// NSRegularExpression per line of every comment body, on every render.
+    static func headingText(_ trimmed: String) -> String? {
+        var hashes = 0
+        var index = trimmed.startIndex
+        while index < trimmed.endIndex, trimmed[index] == "#", hashes < 6 {
+            hashes += 1
+            index = trimmed.index(after: index)
+        }
+        guard hashes > 0, index < trimmed.endIndex, trimmed[index] == " " else { return nil }
+        while index < trimmed.endIndex, trimmed[index] == " " { index = trimmed.index(after: index) }
+        return String(trimmed[index...])
+    }
     /// Splits prose into heading lines (#, ##, ###…) and paragraph runs.
     static func headingChunks(_ text: String) -> [Chunk] {
         var chunks: [Chunk] = []
@@ -531,9 +693,9 @@ extension MarkdownBodyView {
         }
         for line in text.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("#"), let range = trimmed.range(of: "^#{1,6} +", options: .regularExpression) {
+            if let heading = Self.headingText(trimmed) {
                 flush()
-                chunks.append(Chunk(text: String(trimmed[range.upperBound...]), isHeading: true))
+                chunks.append(Chunk(text: heading, isHeading: true))
             } else {
                 para.append(line)
             }
@@ -574,13 +736,7 @@ public struct CommentCardView: View {
         self.indented = indented
     }
 
-    private var age: String {
-        let fmt = ISO8601DateFormatter()
-        guard let date = fmt.date(from: comment.createdAt) else { return "" }
-        let rel = RelativeDateTimeFormatter()
-        rel.unitsStyle = .abbreviated
-        return rel.localizedString(for: date, relativeTo: Date())
-    }
+    private var age: String { Dates.age(iso: comment.createdAt) }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -813,15 +969,19 @@ struct InlineFindingView: View {
 }
 
 /// Holds row frames without publishing changes. See `rowFrames`.
+///
+/// Deliberately not observable: these are written during layout, for every
+/// visible row, on every scroll tick. Anything that invalidated a view here
+/// would loop.
 private final class RowFrameStore: @unchecked Sendable {
-    var frames: [Int: CGRect] = [:]
-}
+    private(set) var frames: [Int: CGRect] = [:]
 
-private struct RowFramesKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] { [:] }
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
-    }
+    func record(_ id: Int, _ frame: CGRect) { frames[id] = frame }
+
+    /// Frames are in the scroll content's coordinate space, so they stay
+    /// correct as rows scroll away — but they belong to one file in one
+    /// layout, and must go when either changes.
+    func reset() { frames.removeAll(keepingCapacity: true) }
 }
 
 /// Full-height strip over the center divider that drags the old/new column

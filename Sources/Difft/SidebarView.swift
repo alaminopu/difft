@@ -5,7 +5,6 @@ import DifftUI
 
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
-    @State private var search = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +24,13 @@ struct SidebarView: View {
                         model.session = nil
                         model.files = []
                         model.comments = []; model.commits = []
+                        // The old repo's PRs stayed on screen and stayed
+                        // clickable while the new list loaded — opening one
+                        // ran its number against the wrong checkout.
+                        model.prs = []
+                        model.prAuthors = []
+                        model.currentHead = nil
+                        model.refreshNote = nil; model.worktreeNote = nil
                         Task { await model.loadPRs() }
                     }
                 } label: {
@@ -44,103 +50,285 @@ struct SidebarView: View {
                 // since ReviewSession is a nested ObservableObject (Task 13 controller ruling #2).
                 FileTreeView(session: session)
             } else {
-                PRListView(search: $search)
+                PRListView()
             }
         }
     }
 }
 
+/// What the list is currently asking GitHub for. Changing either field
+/// restarts the query, so they travel together.
+private struct PRQuery: Hashable {
+    var scope: PRScope
+    var search: String
+    var authors: [String]
+}
+
 private struct PRListView: View {
     @EnvironmentObject var model: AppModel
-    @Binding var search: String
 
-    private var filtered: [PullRequest] {
-        guard !search.isEmpty else { return model.prs }
-        let q = search.lowercased()
-        return model.prs.filter {
-            String($0.number).contains(q)
-                || $0.title.lowercased().contains(q)
-                || $0.authorLogin.lowercased().contains(q)
+    /// How long after the last keystroke the query is sent. Every query is a
+    /// `gh` process against GitHub's search API; one per keystroke would both
+    /// lag and burn rate limit.
+    private static let debounce = Duration.milliseconds(300)
+    /// How often the list re-asks while it is on screen. A PR opened in the
+    /// browser used to require quitting the app to appear.
+    private static let pollInterval = Duration.seconds(60)
+
+    private var query: PRQuery {
+        PRQuery(scope: model.prScope, search: model.prSearch,
+                authors: model.prAuthors.sorted())
+    }
+
+    /// The row a finished query wants at the top. Set only by the query task,
+    /// never by the poll, so a background refresh leaves the scroll alone.
+    @State private var topOfResults: Int?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            searchField
+            filterRow
+            authorChips
+            Divider()
+            list
+        }
+        .task(id: query) {
+            // The first pass should not wait; only a changing query debounces.
+            if !model.prs.isEmpty {
+                try? await Task.sleep(for: Self.debounce)
+                guard !Task.isCancelled else { return }
+            }
+            await model.loadPRs()
+            topOfResults = model.prs.first?.number
+        }
+        .task {
+            // Quietly, so a network blip while the window sits open does not
+            // replace the list the user is reading with an error.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.pollInterval)
+                guard !Task.isCancelled else { return }
+                await model.loadPRs(silent: true)
+            }
+        }
+        // Coming back to the app is exactly when a PR opened elsewhere should
+        // already be in the list.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await model.loadPRs(silent: true) }
         }
     }
 
-    var body: some View {
-        HStack(spacing: 4) {
+    private var searchField: some View {
+        HStack(spacing: Spacing.sm) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .imageScale(.small)
-            TextField("Filter by title, #number or author", text: $search)
+            TextField("Search #number, title, author:login", text: $model.prSearch)
                 .textFieldStyle(.plain)
                 .font(.callout)
-            if !search.isEmpty {
-                Button {
-                    search = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Clear filter")
+                .onSubmit { Task { await model.loadPRs() } }
+            if model.isLoadingPRs {
+                ProgressView().controlSize(.small).scaleEffect(0.55).frame(width: 14, height: 14)
+            } else if !model.prSearch.isEmpty {
+                Button { model.prSearch = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
-        .padding(.horizontal, 10)
-        .padding(.bottom, 8)
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, Spacing.sm)
+        .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: Radius.md))
+        .overlay(RoundedRectangle(cornerRadius: Radius.md).strokeBorder(Palette.hairline))
+        .padding(.horizontal, Spacing.md)
+        .help("Searches the whole repository, not just the loaded page. "
+              + "A bare number opens that PR whatever its state.")
+    }
 
-        HStack {
-            Text("Open Pull Requests")
-                .font(.caption.smallCaps())
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(search.isEmpty ? "\(model.prs.count)" : "\(filtered.count)/\(model.prs.count)")
+    private var filterRow: some View {
+        HStack(spacing: Spacing.sm) {
+            Picker("State", selection: $model.prScope) {
+                ForEach(PRScope.allCases) { Text($0.label).tag($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .fixedSize()
+
+            AuthorFilterButton()
+
+            Spacer(minLength: 0)
+
+            Text(model.prsTruncated ? "\(model.prs.count)+" : "\(model.prs.count)")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 2)
+                .help(model.prsTruncated
+                      ? "Showing the first \(AppModel.prPageSize); search to narrow it down."
+                      : "Pull requests matching the current filter")
 
-        List(filtered) { pr in
-            Button {
-                Task { await model.openPR(pr) }
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    Text(verbatim: "#\(String(pr.number))")
-                        .font(.caption.monospacedDigit().bold())
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(pr.title).lineLimit(2)
-                        Label(pr.authorLogin, systemImage: "person")
-                            .font(Typography.meta)
-                            .foregroundStyle(.secondary)
-                    }
-                    // A first open has to check the PR out into a worktree,
-                    // which is not quick on a large repo. Without this the
-                    // click looked like it had not registered.
-                    if model.openingPRNumber == pr.number {
-                        ProgressView()
-                            .controlSize(.small)
-                            .padding(.leading, Spacing.xs)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            Button { Task { await model.loadPRs() } } label: {
+                Image(systemName: "arrow.clockwise")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Pull request \(pr.number): \(pr.title), by \(pr.authorLogin)")
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(model.isLoadingPRs)
+            .help("Refresh the list")
+            .accessibilityLabel("Refresh pull requests")
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+    }
+
+    /// The selected authors, shown under the filter row so the narrowing is
+    /// visible without opening the picker — and removable in one click.
+    @ViewBuilder
+    private var authorChips: some View {
+        if !model.prAuthors.isEmpty {
+            FlowLayout(spacing: Spacing.xs, lineSpacing: Spacing.xs) {
+                ForEach(model.prAuthors.sorted(), id: \.self) { login in
+                    Button { model.prAuthors.remove(login) } label: {
+                        HStack(spacing: Spacing.xs) {
+                            Text(login).lineLimit(1)
+                            Image(systemName: "xmark").imageScale(.small)
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.15), in: Capsule())
+                        .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop filtering by \(login)")
+                    .accessibilityLabel("Remove author filter \(login)")
+                }
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.bottom, Spacing.sm)
+        }
+    }
+
+    private var list: some View {
+        // A new query is a new list, so it has to start at the top. Without
+        // this it kept the offset it held for the previous results, and the
+        // row a number search had just pinned to the top rendered with its
+        // first line clipped under the filter bar.
+        ScrollViewReader { proxy in
+            List(model.prs) { pr in
+                Button {
+                    Task { await model.openPR(pr) }
+                } label: {
+                    PRRow(pr: pr, opening: model.openingPRNumber == pr.number)
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 1, leading: Spacing.xs,
+                                          bottom: 1, trailing: Spacing.xs))
+                .listRowSeparator(.hidden)
+                .accessibilityLabel("Pull request \(pr.number): \(pr.title), by \(pr.authorLogin), \(pr.stateLabel)")
+            }
+            .onChange(of: topOfResults) { _, top in
+                // Only when the query changed: a background refresh must not
+                // yank the list out from under someone reading it.
+                guard let top else { return }
+                proxy.scrollTo(top, anchor: .top)
+            }
         }
         .listStyle(.sidebar)
         .overlay {
-            if model.prs.isEmpty {
-                ContentUnavailableView("No open PRs", systemImage: "tray",
-                                       description: Text("Pull requests from `gh pr list` appear here."))
-            } else if filtered.isEmpty {
-                ContentUnavailableView.search(text: search)
+            if model.prs.isEmpty, !model.isLoadingPRs {
+                if model.prSearch.isEmpty {
+                    ContentUnavailableView(
+                        "No \(model.prScope.label.lowercased()) PRs",
+                        systemImage: "tray",
+                        description: Text(model.prAuthors.isEmpty
+                                          ? "Nothing matches this filter."
+                                          : "Nothing from the authors you picked."))
+                } else {
+                    ContentUnavailableView.search(text: model.prSearch)
+                }
             }
         }
-        .task { await model.loadPRs() }
+    }
+}
+
+/// One row of the pull-request list: number, title, who and when, and the
+/// state — so a searched-for merged PR is recognisable as merged without
+/// opening it.
+private struct PRRow: View {
+    let pr: PullRequest
+    let opening: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(pr.title)
+                    .font(.callout)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(subtitle)
+                    .font(Typography.meta)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            // A column of its own, top-aligned: inline with the title it slid
+            // around as the title wrapped, and landed mid-sentence.
+            VStack(alignment: .trailing, spacing: Spacing.xxs) {
+                if let badge { StateBadge(text: badge.text, tint: badge.tint) }
+                // A first open has to check the PR out into a worktree, which
+                // is not quick on a large repo. Without this the click looked
+                // like it had not registered.
+                if opening { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(hovering ? Palette.hover : .clear,
+                    in: RoundedRectangle(cornerRadius: Radius.sm))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+
+    /// Draft and a closed state are mutually exclusive in practice — GitHub
+    /// will not let a merged PR be a draft — so one badge is enough, and one
+    /// badge keeps the row a fixed shape.
+    private var badge: (text: String, tint: Color)? {
+        if !pr.isOpen {
+            return (pr.stateLabel, pr.stateLabel == "MERGED" ? .purple : .red)
+        }
+        if pr.isDraft == true { return ("DRAFT", .secondary) }
+        return nil
+    }
+
+    private var subtitle: String {
+        var parts = ["#\(pr.number)"]
+        if let created = Self.created(pr.createdAt) { parts.append(created) }
+        if !pr.authorLogin.isEmpty { parts.append(pr.authorLogin) }
+        return parts.joined(separator: "  ·  ")
+    }
+
+    /// nil rather than a placeholder when the date is missing or unparseable —
+    /// the row simply drops that segment.
+    static func created(_ iso: String?) -> String? {
+        guard let iso, let date = Dates.parse(iso) else { return nil }
+        return date.formatted(.dateTime.day().month(.abbreviated).year())
+    }
+}
+
+private struct StateBadge: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, Spacing.xs + 1)
+            .padding(.vertical, 1)
+            .background(tint.opacity(0.15), in: Capsule())
+            .fixedSize()
     }
 }
 

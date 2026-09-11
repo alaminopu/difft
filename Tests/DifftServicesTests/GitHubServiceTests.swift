@@ -20,7 +20,63 @@ final class GitHubServiceTests: XCTestCase {
         let prs = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"))
         XCTAssertEqual(prs, [PullRequest(number: 12, title: "Fix bug", body: "Fixes crash", headRefName: "fix/crash", authorLogin: "alice")])
         XCTAssertEqual(fake.calls[0].executable, "gh")
-        XCTAssertEqual(fake.calls[0].arguments, ["pr", "list", "--json", "number,title,body,headRefName,baseRefName,author", "--limit", "50"])
+        XCTAssertEqual(fake.calls[0].arguments,
+                       ["pr", "list", "--state", "open", "--limit", "100",
+                        "--json", GitHubService.prFields])
+    }
+
+    /// Filtering a fetched page only ever searches that page. On a repository
+    /// with hundreds of PRs the query has to reach GitHub.
+    func testSearchAndScopeAreSentToGitHub() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "[]", stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        _ = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"),
+                                  scope: .merged, search: "  author:alice  ")
+        let args = fake.calls[0].arguments
+        XCTAssertEqual(Array(args[0..<4]), ["pr", "list", "--state", "merged"])
+        // Trimmed, so trailing whitespace from the search field is not a term.
+        XCTAssertEqual(args.last, "author:alice")
+        XCTAssertEqual(args[args.count - 2], "--search")
+    }
+
+    func testNoSearchFlagWhenTheQueryIsEmpty() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "[]", stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        _ = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"), search: "   ")
+        XCTAssertFalse(fake.calls[0].arguments.contains("--search"))
+    }
+
+    /// A PR reached by number is usually one that has already been merged, so
+    /// the state has to come back with it.
+    func testFetchPRByNumberCarriesState() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        {"number": 6022, "title": "Old work", "body": "", "headRefName": "x",
+         "baseRefName": "main", "author": {"login": "alice"},
+         "state": "MERGED", "isDraft": false, "createdAt": "2026-01-02T03:04:05Z"}
+        """, stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let pr = try await svc.fetchPR(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 6022)
+        XCTAssertEqual(pr.number, 6022)
+        XCTAssertEqual(pr.stateLabel, "MERGED")
+        XCTAssertFalse(pr.isOpen)
+        XCTAssertEqual(Array(fake.calls[0].arguments[0..<3]), ["pr", "view", "6022"])
+    }
+
+    /// An account deleted since it opened the PR decodes to no login rather
+    /// than failing the whole list.
+    func testMissingAuthorDoesNotFailTheList() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        [{"number": 1, "title": "t", "body": "", "headRefName": "h", "author": null}]
+        """, stderr: "", exitCode: 0)]
+        let svc = GitHubService(runner: fake)
+        let prs = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"))
+        XCTAssertEqual(prs.first?.authorLogin, "")
+        // No state field at all still reads as open.
+        XCTAssertTrue(prs.first?.isOpen ?? false)
     }
 
     func testFetchDiffParsesIntoFileDiffs() async throws {

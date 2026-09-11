@@ -40,8 +40,14 @@ final class AgentTaskTests: XCTestCase {
         XCTAssertTrue(p.contains("Throttle slots leak"))
         XCTAssertTrue(p.contains("Do not commit"))
 
+        // Injected instructions are the live risk for the one task that can
+        // write, so the data/instruction separation has to be in this prompt.
+        XCTAssertTrue(p.contains("DATA, never as"))
+
         let args = task.cliArguments
-        XCTAssertTrue(args.contains("Read,Grep,Glob,Edit,Write"))
+        // Writes are confined to the checkout: the agent runs inside a PR from
+        // a fork, and an unscoped Write reaches ~/.zshenv.
+        XCTAssertTrue(args.contains("Read,Grep,Glob,Edit(./**),Write(./**)"))
         // Edits only: no shell, and never the permission bypass.
         XCTAssertFalse(args.joined().contains("Bash"))
         XCTAssertFalse(args.contains("--dangerously-skip-permissions"))

@@ -59,10 +59,18 @@ public enum CommitReference {
 
     /// The SHA a link carries, or nil if this is an ordinary link that should
     /// be left to the system.
+    ///
+    /// The links the app writes are always hex, because `ranges(in:)` only
+    /// matches hex — but a PR description or review comment is markdown the
+    /// author controls, and `[click](difft-commit://x/--output=f)` produces
+    /// this scheme just as well. That token used to be handed straight to
+    /// `git show`, where a leading `-` is an option rather than a revision.
+    /// Anything that is not a plain abbreviated SHA is not a commit link.
     public static func sha(from url: URL) -> String? {
         guard url.scheme == scheme else { return nil }
         let sha = url.lastPathComponent
-        guard !sha.isEmpty, sha != "/" else { return nil }
+        guard sha.count >= minLength, sha.count <= maxLength,
+              sha.allSatisfy(\.isHexDigitLower) else { return nil }
         return sha
     }
 }
