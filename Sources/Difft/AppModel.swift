@@ -328,16 +328,38 @@ final class AppModel: ObservableObject {
     /// PR's files with another's head.
     private struct FullDiff { let files: [FileDiff]; let head: String }
 
-    private func fetchFullContextDiff(repoDir: URL, pr: PullRequest) async -> FullDiff? {
+    /// - Parameter force: fetch even when the checkout already looks current.
+    ///   An explicit refresh must go to the network; opening a PR need not.
+    private func fetchFullContextDiff(repoDir: URL, pr: PullRequest,
+                                      force: Bool = false) async -> FullDiff? {
         guard let base = pr.baseRefName else { return nil }
         do {
             let remote = await remoteName(repoDir: repoDir)
             let worktrees = WorktreeManager(
                 runner: processRunner,
                 baseDir: Self.appSupportDir.appendingPathComponent("worktrees"))
-            // Always re-fetch the PR head. Reusing whatever the worktree was
-            // left at is what made re-opening a PR show the commits it had
-            // when it was first opened, however long ago that was.
+
+            // The checkout is already at the commit GitHub reported for this
+            // PR, so there is nothing to fetch.
+            //
+            // Re-fetching unconditionally is what stopped a re-opened PR
+            // showing yesterday's commits, but a `git fetch` against a large
+            // repository costs a couple of seconds even when it transfers
+            // nothing — it is the handshake and the ref advertisement, so
+            // `ls-remote` is no cheaper. This compares against the same list
+            // payload the row just clicked was drawn from, which the list
+            // re-fetches every minute and whenever the app is activated.
+            if !force, let expected = pr.headRefOid, !expected.isEmpty,
+               let local = await worktrees.currentHead(repoName: repoName, prNumber: pr.number),
+               local == expected {
+                let wt = worktrees.worktreeURL(repoName: repoName, prNumber: pr.number)
+                guard let baseRef = await resolveBase(pr: pr, base: base,
+                                                      remote: remote, worktree: wt),
+                      let files = await parseDiff(worktree: wt, baseRef: baseRef,
+                                                  remote: remote) else { return nil }
+                return FullDiff(files: files, head: local)
+            }
+
             let head: String
             do {
                 head = try await worktrees.refreshWorktree(
@@ -352,22 +374,26 @@ final class AppModel: ObservableObject {
                 head = stale
             }
             let wt = worktrees.worktreeURL(repoName: repoName, prNumber: pr.number)
-            guard let baseRef = await resolveBase(pr: pr, base: base, remote: remote, worktree: wt)
+            guard let baseRef = await resolveBase(pr: pr, base: base, remote: remote, worktree: wt),
+                  let files = await parseDiff(worktree: wt, baseRef: baseRef, remote: remote)
             else { return nil }
-            let diff = try await processRunner.run(
-                "git", arguments: ["diff", "-U100000", "--merge-base", baseRef, "HEAD"],
-                currentDirectory: wt)
-            guard diff.exitCode == 0, !diff.stdout.isEmpty else { return nil }
-            // Parsing a multi-megabyte full-context diff on the main actor
-            // froze the UI for the whole open.
-            let text = diff.stdout
-            let parsed = await Task.detached(priority: .userInitiated) {
-                DiffParser.parse(text)
-            }.value
-            guard !parsed.isEmpty else { return nil }
-            let annotated = await annotateGenerated(parsed, worktree: wt, baseRef: baseRef)
-            return FullDiff(files: annotated, head: head)
+            return FullDiff(files: files, head: head)
         } catch { return nil }
+    }
+
+    private func parseDiff(worktree: URL, baseRef: String, remote: String) async -> [FileDiff]? {
+        guard let diff = try? await processRunner.run(
+                "git", arguments: ["diff", "-U100000", "--merge-base", baseRef, "HEAD"],
+                currentDirectory: worktree),
+              diff.exitCode == 0, !diff.stdout.isEmpty else { return nil }
+        // Parsing a multi-megabyte full-context diff on the main actor froze
+        // the UI for the whole open.
+        let text = diff.stdout
+        let parsed = await Task.detached(priority: .userInitiated) {
+            DiffParser.parse(text)
+        }.value
+        guard !parsed.isEmpty else { return nil }
+        return await annotateGenerated(parsed, worktree: worktree, baseRef: baseRef)
     }
 
     /// What to diff against.
@@ -759,7 +785,7 @@ final class AppModel: ObservableObject {
             // Re-fetching the head is part of building the full-context diff,
             // so refreshing is the same work as opening — doing it here too
             // fetched the same ref twice.
-            let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr)
+            let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr, force: true)
             if let full {
                 files = full.files
             } else {

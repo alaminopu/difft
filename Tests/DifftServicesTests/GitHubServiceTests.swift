@@ -290,4 +290,53 @@ extension GitHubServiceTests {
         XCTAssertEqual(login, "alamin-br")
         XCTAssertEqual(fake.calls[0].arguments, ["api", "user", "--jq", ".login"])
     }
+    /// Draft is not one of GitHub's states — it is a flag on an open PR — so
+    /// the draft scopes list open PRs and narrow with a search qualifier.
+    func testDraftScopesListOpenPRsWithAQualifier() async throws {
+        for (scope, qualifier) in [(PRScope.draft, "is:draft"), (PRScope.ready, "-is:draft")] {
+            let fake = FakeProcessRunner()
+            fake.responses = [ProcessResult(stdout: "[]", stderr: "", exitCode: 0)]
+            _ = try await GitHubService(runner: fake).listPRs(
+                repoDir: URL(fileURLWithPath: "/tmp/repo"), scope: scope)
+            let args = fake.calls[0].arguments
+            XCTAssertEqual(Array(args[0..<4]), ["pr", "list", "--state", "open"])
+            XCTAssertEqual(args.last, qualifier)
+            XCTAssertEqual(args[args.count - 2], "--search")
+        }
+    }
+
+    /// The qualifier has to survive alongside what the user typed, not
+    /// replace it.
+    func testDraftQualifierCombinesWithTheUserSearch() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "[]", stderr: "", exitCode: 0)]
+        _ = try await GitHubService(runner: fake).listPRs(
+            repoDir: URL(fileURLWithPath: "/tmp/repo"), scope: .draft, search: "author:alice")
+        XCTAssertEqual(fake.calls[0].arguments.last, "author:alice is:draft")
+    }
+
+    /// "Open" keeps covering drafts, the way GitHub's own Open tab does.
+    func testOpenScopeAddsNoQualifier() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "[]", stderr: "", exitCode: 0)]
+        _ = try await GitHubService(runner: fake).listPRs(
+            repoDir: URL(fileURLWithPath: "/tmp/repo"), scope: .open)
+        XCTAssertFalse(fake.calls[0].arguments.contains("--search"))
+    }
+
+    /// Opening a PR compares the checkout against this to decide whether it
+    /// needs the network at all, so it has to come back with the list.
+    func testListCarriesTheHeadCommit() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        [{"number": 1, "title": "t", "body": "", "headRefName": "h",
+          "baseRefName": "main", "baseRefOid": "aaa", "headRefOid": "bbb",
+          "author": {"login": "alice"}}]
+        """, stderr: "", exitCode: 0)]
+        let prs = try await GitHubService(runner: fake).listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"))
+        XCTAssertEqual(prs.first?.headRefOid, "bbb")
+        XCTAssertEqual(prs.first?.baseRefOid, "aaa")
+        XCTAssertTrue(GitHubService.prFields.contains("headRefOid"))
+    }
+
 }

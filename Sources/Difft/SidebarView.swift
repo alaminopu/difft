@@ -148,12 +148,23 @@ private struct PRListView: View {
     private var filterRow: some View {
         HStack(spacing: Spacing.sm) {
             Picker("State", selection: $model.prScope) {
-                ForEach(PRScope.allCases) { Text($0.label).tag($0) }
+                // Grouped, because draft is not a state — it is a flag on an
+                // open PR. Flat, "Open" and "Ready for review" both read as
+                // "not closed" and nothing says the first includes the other
+                // two.
+                Section("Open") {
+                    ForEach(PRScope.openScopes) { Text($0.label).tag($0) }
+                }
+                Section {
+                    ForEach(PRScope.closedScopes) { Text($0.label).tag($0) }
+                }
             }
             .labelsHidden()
             .pickerStyle(.menu)
             .controlSize(.small)
             .fixedSize()
+            .help("All open includes drafts, the way GitHub's own Open tab does. "
+                  + "Ready for review is the open PRs that are not drafts.")
 
             AuthorFilterButton()
 
@@ -237,10 +248,10 @@ private struct PRListView: View {
             if model.prs.isEmpty, !model.isLoadingPRs {
                 if model.prSearch.isEmpty {
                     ContentUnavailableView(
-                        "No \(model.prScope.label.lowercased()) PRs",
+                        "Nothing here",
                         systemImage: "tray",
                         description: Text(model.prAuthors.isEmpty
-                                          ? "Nothing matches this filter."
+                                          ? model.prScope.emptyDescription
                                           : "Nothing from the authors you picked."))
                 } else {
                     ContentUnavailableView.search(text: model.prSearch)

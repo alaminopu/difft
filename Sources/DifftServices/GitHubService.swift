@@ -16,6 +16,13 @@ public struct PullRequest: Codable, Equatable, Identifiable, Sendable {
     /// already been merged: the branch now contains the PR, so the merge-base
     /// is the head itself and the diff comes out empty.
     public let baseRefOid: String?
+    /// The PR's head commit, as GitHub reported it when the list was fetched.
+    ///
+    /// Lets opening a PR skip the network entirely when the checkout is
+    /// already at that commit — which is the common case, and a `git fetch`
+    /// against a large repository costs a couple of seconds even when it
+    /// transfers nothing.
+    public let headRefOid: String?
     public let authorLogin: String
     /// "OPEN", "CLOSED" or "MERGED". Optional for the same reason as
     /// `baseRefName`: sessions written before the list could show anything but
@@ -27,11 +34,13 @@ public struct PullRequest: Codable, Equatable, Identifiable, Sendable {
     public let createdAt: String?
 
     public init(number: Int, title: String, body: String, headRefName: String,
-                baseRefName: String? = nil, baseRefOid: String? = nil, authorLogin: String,
+                baseRefName: String? = nil, baseRefOid: String? = nil,
+                headRefOid: String? = nil, authorLogin: String,
                 state: String? = nil, isDraft: Bool? = nil, createdAt: String? = nil) {
         self.number = number; self.title = title; self.body = body
         self.headRefName = headRefName; self.baseRefName = baseRefName
         self.baseRefOid = baseRefOid
+        self.headRefOid = headRefOid
         self.authorLogin = authorLogin
         self.state = state; self.isDraft = isDraft; self.createdAt = createdAt
     }
@@ -90,15 +99,59 @@ public enum PRSearchQuery {
 ///
 /// Open-only was the whole world until the list could search; searching for a
 /// number you remember usually means a PR that has already been merged.
+///
+/// Draft is not one of GitHub's states — it is a flag on an open pull request
+/// — so "Open" covers both, the way GitHub's own Open tab and `gh pr list` do,
+/// and the two draft scopes narrow it with a search qualifier.
 public enum PRScope: String, CaseIterable, Identifiable, Sendable {
-    case open, closed, merged, all
+    case open, ready, draft, closed, merged, all
     public var id: Self { self }
+
+    /// What `gh pr list --state` is given.
+    var ghState: String {
+        switch self {
+        case .ready, .draft: return "open"
+        default: return rawValue
+        }
+    }
+
+    /// Extra search terms, ANDed with whatever the user typed.
+    var qualifier: String {
+        switch self {
+        case .draft: return "is:draft"
+        case .ready: return "-is:draft"
+        default: return ""
+        }
+    }
+
+    /// "Open" on its own is ambiguous once drafts can be filtered separately:
+    /// it reads as the opposite of closed *and* as the opposite of draft. The
+    /// three open scopes say which they are.
     public var label: String {
         switch self {
-        case .open: return "Open"
+        case .open: return "All open"
+        case .ready: return "Ready for review"
+        case .draft: return "Draft"
         case .closed: return "Closed"
         case .merged: return "Merged"
         case .all: return "All"
+        }
+    }
+
+    /// Scopes that narrow the open pull requests, versus the states.
+    public static let openScopes: [PRScope] = [.open, .ready, .draft]
+    public static let closedScopes: [PRScope] = [.closed, .merged, .all]
+
+    /// Reads as a sentence, which "No ready for review PRs" does not.
+    public var emptyDescription: String {
+        switch self {
+        case .open: return "No open pull requests."
+        case .ready: return "Every open pull request is still a draft."
+        case .draft: return "No open pull request is a draft."
+
+        case .closed: return "No closed pull requests."
+        case .merged: return "No merged pull requests."
+        case .all: return "No pull requests."
         }
     }
 }
@@ -218,17 +271,18 @@ public final class GitHubService: Sendable {
 
     /// Fields both the list and the single-PR lookup ask for, so the two
     /// cannot drift into returning differently-populated PullRequests.
-    static let prFields = "number,title,body,headRefName,baseRefName,baseRefOid,author,state,isDraft,createdAt"
+    static let prFields = "number,title,body,headRefName,baseRefName,baseRefOid,headRefOid,author,state,isDraft,createdAt"
 
     private struct RawPR: Codable {
         struct Author: Codable { let login: String? }
         let number: Int; let title: String; let body: String; let headRefName: String
-        let baseRefName: String?; let baseRefOid: String?; let author: Author?
+        let baseRefName: String?; let baseRefOid: String?; let headRefOid: String?
+        let author: Author?
         let state: String?; let isDraft: Bool?; let createdAt: String?
 
         var pullRequest: PullRequest {
             PullRequest(number: number, title: title, body: body, headRefName: headRefName,
-                        baseRefName: baseRefName, baseRefOid: baseRefOid,
+                        baseRefName: baseRefName, baseRefOid: baseRefOid, headRefOid: headRefOid,
                         // A PR opened by a deleted account has no login, and
                         // decoding must not fail over an empty byline.
                         authorLogin: author?.login ?? "",
@@ -244,9 +298,12 @@ public final class GitHubService: Sendable {
     /// `is:draft` — is a server-side query over the whole repository.
     public func listPRs(repoDir: URL, scope: PRScope = .open,
                         search: String = "", limit: Int = 100) async throws -> [PullRequest] {
-        var args = ["pr", "list", "--state", scope.rawValue,
+        var args = ["pr", "list", "--state", scope.ghState,
                     "--limit", String(max(1, limit)), "--json", Self.prFields]
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = [search, scope.qualifier]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
         if !query.isEmpty { args += ["--search", query] }
         let r = try await runner.run("gh", arguments: args, currentDirectory: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
