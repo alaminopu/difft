@@ -289,8 +289,6 @@ struct MainSplitView: View {
     @AppStorage("showRightPanel") private var showRightPanel = false
 
     @AppStorage("rightPanelTab") private var panelTab = 0
-    /// Deleting every checkout is not undoable and takes no time to confirm.
-    @State private var confirmingClean = false
 
     var body: some View {
         NavigationSplitView {
@@ -324,18 +322,7 @@ struct MainSplitView: View {
                     }
                 }
                 Divider()
-                ToolStrip(showPanel: $showRightPanel, tab: $panelTab,
-                          onReport: generateReport, onClean: { confirmingClean = true })
-            }
-            .confirmationDialog("Delete cached pull-request checkouts?",
-                                isPresented: $confirmingClean, titleVisibility: .visible) {
-                Button("Delete them", role: .destructive) { cleanWorktrees() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Removes every PR checkout under Application Support, freeing the disk "
-                     + "they use. The PR you have open is kept. Anything else is re-fetched "
-                     + "the next time you open it — including any fix Claude wrote and you "
-                     + "have not saved elsewhere.")
+                ToolStrip(showPanel: $showRightPanel, tab: $panelTab)
             }
             // ⌥⌘0 still toggles the panel; the visible toggle lives in the strip.
             .background(
@@ -348,36 +335,6 @@ struct MainSplitView: View {
         }
     }
 
-    private func generateReport() {
-        Task {
-            do {
-                let url = try await model.generateReport()
-                NSWorkspace.shared.open(url)
-                model.errorBanner = nil
-            } catch {
-                model.errorBanner = "Failed to generate report: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func cleanWorktrees() {
-        let baseDir = AppModel.appSupportDir.appendingPathComponent("worktrees")
-        // The open PR's checkout is spared: deleting it left the diff on
-        // screen working while every commit in it failed to load.
-        let keep = model.session.map {
-            baseDir.appendingPathComponent("\(model.repoName)-pr\($0.data.pr.number)")
-        }
-        Task {
-            let removed = await Task.detached(priority: .utility) { () -> Int in
-                (try? WorktreeManager(runner: DefaultProcessRunner(), baseDir: baseDir)
-                    .prune(olderThan: 0, keeping: keep)) ?? 0
-            }.value
-            // Silence looked like nothing had happened.
-            model.refreshNote = removed == 0
-                ? "No cached checkouts to delete"
-                : "Deleted \(removed) cached checkout\(removed == 1 ? "" : "s")"
-        }
-    }
 }
 
 /// IntelliJ-style vertical tool-window strip: one icon per assistant tab,
@@ -387,9 +344,6 @@ struct ToolStrip: View {
     @EnvironmentObject var model: AppModel
     @Binding var showPanel: Bool
     @Binding var tab: Int
-    var onReport: () -> Void = {}
-    var onClean: () -> Void = {}
-
     private let items: [(icon: String, label: String)] = [
         ("bubble.left.and.text.bubble.right", "Claude"),
         ("checklist", "Findings"),
@@ -425,33 +379,6 @@ struct ToolStrip: View {
                 .accessibilityLabel("\(items[i].label) panel")
             }
             Spacer()
-            Divider().frame(width: 20)
-            Button {
-                onReport()
-            } label: {
-                Image(systemName: "doc.richtext")
-                    .imageScale(.medium)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .disabled(model.session == nil)
-            .opacity(model.session == nil ? 0.35 : 1)
-            .help(model.session == nil
-                  ? "Generate HTML report — open a pull request first"
-                  : "Generate HTML report and open it")
-            .accessibilityLabel("Generate report")
-            Button {
-                onClean()
-            } label: {
-                Image(systemName: "folder.badge.minus")
-                    .imageScale(.medium)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Delete all Difft worktree checkouts")
-            .accessibilityLabel("Clean worktrees")
         }
         .padding(.vertical, 10)
         .frame(width: 36)

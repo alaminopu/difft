@@ -103,17 +103,15 @@ public final class WorktreeManager: Sendable {
 
     /// Deletes checkouts untouched for `days`, returning how many went.
     ///
-    /// `keeping` is the checkout currently open: at `olderThan: 0` this
-    /// deletes everything, and deleting the open PR's own checkout left the
-    /// diff on screen working while every commit in it failed to load.
+    /// Background housekeeping only, run once at launch. A checkout the app is
+    /// using is touched on every open, so the age test alone keeps it.
     @discardableResult
-    public func prune(olderThan days: Int, keeping: URL? = nil) throws -> Int {
+    public func prune(olderThan days: Int) throws -> Int {
         let fm = FileManager.default
         let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
         let contents = (try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         var removed = 0
         for url in contents {
-            if let keeping, url.standardizedFileURL == keeping.standardizedFileURL { continue }
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
             if modified < cutoff {
                 try fm.removeItem(at: url)

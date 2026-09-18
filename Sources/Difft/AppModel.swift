@@ -979,20 +979,4 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Snapshots session/files state on the main actor, then renders the HTML
-    /// and writes it off the main actor in a detached task — a full diff can
-    /// be megabytes and must not block the UI.
-    func generateReport() async throws -> URL {
-        guard let session else { throw GitHubServiceError.commandFailed("no session") }
-        let sessionData = session.data
-        let filesSnapshot = files
-        let repo = repoName
-        return try await Task.detached(priority: .userInitiated) {
-            let html = ReportBuilder.html(for: ReportInput(session: sessionData, files: filesSnapshot))
-            let url = ReportBuilder.defaultURL(repoName: repo, prNumber: sessionData.pr.number, date: Date())
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data(html.utf8).write(to: url)
-            return url
-        }.value
-    }
 }

@@ -63,8 +63,6 @@ A side panel running your local agent CLI inside a dedicated git worktree of the
 
 Chat and Findings run read-only. Asking one to fix a finding lets it edit files, but only inside that disposable worktree — never your checkout.
 
-**Reports** write a self-contained HTML file to `~/Documents/Difft-reports/` — findings, transcript, and the full diff, with no external resources.
-
 ## Settings
 
 ⌘, sets appearance, syntax colours, and the code font and size. The font is pushed into the highlighter rather than applied around it, so it reaches the highlighted code.
@@ -88,6 +86,6 @@ swift run Difft   # dev build
 scripts/release.sh 0.2.0
 ```
 
-Four targets: `DifftCore` (diff model and parsing, pure logic), `DifftServices` (subprocesses, sessions, reports), `DifftUI` (the renderer), `Difft` (the app).
+Four targets: `DifftCore` (diff model and parsing, pure logic), `DifftServices` (subprocesses, sessions, GitHub), `DifftUI` (the renderer), `Difft` (the app).
 
 State lives in `~/Library/Application Support/Difft/` — viewed files, chat, findings, and the PR worktrees — and survives relaunches.
