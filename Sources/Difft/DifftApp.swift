@@ -60,6 +60,15 @@ struct DifftCommands: Commands {
     @ObservedObject var model: AppModel
 
     var body: some Commands {
+        // File menu. Choosing a repository was only reachable from a small
+        // icon in the sidebar header, which is not where anyone looks for it.
+        CommandGroup(after: .newItem) {
+            Button("Open Repository…") {
+                model.chooseRepository()
+            }
+            .keyboardShortcut("o", modifiers: .command)
+        }
+
         CommandGroup(after: .sidebar) {
             Divider()
             Button("All Review Comments") {

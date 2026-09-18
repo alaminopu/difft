@@ -138,6 +138,71 @@ final class AppModel: ObservableObject {
 
     var repoName: String { repoDir?.lastPathComponent ?? "" }
 
+    /// Shows the open panel and switches to whatever is chosen.
+    ///
+    /// Lives here rather than in the sidebar button so the File menu and the
+    /// button cannot drift into resetting different things.
+    func chooseRepository() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open"
+        panel.message = "Choose a git repository to review pull requests from."
+        // Beside the current one, which is usually where the next one is.
+        panel.directoryURL = repoDir?.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await openRepository(at: url) }
+    }
+
+    /// Switches to another checkout.
+    ///
+    /// Everything derived from the old one goes before the new list lands: its
+    /// PRs used to stay on screen and stay clickable while the new ones
+    /// loaded, and opening one ran its number against the wrong checkout.
+    func openRepository(at url: URL) async {
+        repoDir = url   // its didSet clears the author filter and directory
+        session = nil
+        files = []
+        comments = []
+        commits = []
+        commitFiles = []
+        prs = []
+        prSearch = ""
+        prScope = .open
+        prsTruncated = false
+        repoSlug = nil
+        currentHead = nil
+        refreshNote = nil
+        worktreeNote = nil
+        errorBanner = nil
+
+        guard Self.gitRoot(of: url) != nil else {
+            // `gh` would fail with its own wording a second later; saying it
+            // up front is the difference between a mistake and a mystery.
+            errorBanner = "\(url.lastPathComponent) is not inside a git repository."
+            return
+        }
+        await loadPRs()
+    }
+
+    /// The nearest ancestor holding a `.git` entry, or nil.
+    ///
+    /// `.git` is a directory in a clone and a file in a worktree, so this
+    /// tests for either. `gh` runs from any subdirectory of a repository, and
+    /// so should this.
+    static func gitRoot(of url: URL) -> URL? {
+        var dir = url.standardizedFileURL
+        while true {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path) {
+                return dir
+            }
+            let parent = dir.deletingLastPathComponent()
+            guard parent.path != dir.path else { return nil }
+            dir = parent
+        }
+    }
+
     func checkTools() async {
         let gh = await github.checkAvailability()
         let claude = (try? await processRunner.run("which", arguments: ["claude"], currentDirectory: nil))?.exitCode == 0

@@ -17,29 +17,14 @@ struct SidebarView: View {
                     .lineLimit(1)
                 Spacer()
                 Button {
-                    let panel = NSOpenPanel()
-                    panel.canChooseDirectories = true; panel.canChooseFiles = false
-                    if panel.runModal() == .OK, let url = panel.url {
-                        model.repoDir = url
-                        model.session = nil
-                        model.files = []
-                        model.comments = []; model.commits = []
-                        // The old repo's PRs stayed on screen and stayed
-                        // clickable while the new list loaded — opening one
-                        // ran its number against the wrong checkout.
-                        model.prs = []
-                        model.prAuthors = []
-                        model.currentHead = nil
-                        model.refreshNote = nil; model.worktreeNote = nil
-                        Task { await model.loadPRs() }
-                    }
+                    model.chooseRepository()
                 } label: {
                     Image(systemName: "folder.badge.gearshape")
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
-                .help("Choose repository…")
-                .accessibilityLabel("Choose repository")
+                .help("Open another repository (\u{2318}O)")
+                .accessibilityLabel("Open another repository")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
