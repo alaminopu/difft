@@ -80,6 +80,11 @@ final class AppModel: ObservableObject {
     /// hundreds of comments walked all of them again.
     @Published private(set) var commentsByPath: [String: [ReviewComment]] = [:]
     @Published var commits: [Commit] = []
+    /// Submitted review verdicts — approvals and change requests. These decide
+    /// whether a PR is blocked, and the app used to show only the line notes
+    /// underneath them.
+    @Published private(set) var reviews: [PullRequestReview] = []
+    @Published var isSubmittingReview = false
     /// The PR being opened, so the list and centre pane can say so. Opening
     /// waits on `gh`, and without this the app looked frozen on click.
     @Published var openingPRNumber: Int?
@@ -519,6 +524,7 @@ final class AppModel: ObservableObject {
         // different PR.
         comments = []
         commits = []
+        reviews = []
         refreshNote = nil
         worktreeNote = nil
         currentHead = nil
@@ -527,6 +533,7 @@ final class AppModel: ObservableObject {
             // with the diff instead of after it.
             async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
             async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
+            async let reviewsTask = loadReviews(repoDir: repoDir, number: pr.number)
             let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr)
             if let full {
                 files = full.files
@@ -552,6 +559,7 @@ final class AppModel: ObservableObject {
 
             comments = await commentsTask
             commits = await commitsTask
+            reviews = await reviewsTask
             isLoadingDetails = false
         } catch { errorBanner = "Failed to open PR #\(pr.number): \(error.localizedDescription)" }
     }
@@ -685,6 +693,13 @@ final class AppModel: ObservableObject {
         return loaded.sorted { $0.date > $1.date }
     }
 
+    /// Verdicts only. An empty-bodied "COMMENTED" review is the envelope
+    /// GitHub wraps around inline notes, and those are shown on their own.
+    private func loadReviews(repoDir: URL, number: Int) async -> [PullRequestReview] {
+        let loaded = (try? await github.fetchReviews(repoDir: repoDir, number: number)) ?? []
+        return loaded.filter(\.isMeaningful)
+    }
+
     private func loadComments(repoDir: URL, number: Int) async -> [ReviewComment] {
         guard let owner = await nameWithOwner(repoDir: repoDir) else {
             return (try? await github.fetchComments(repoDir: repoDir, number: number)) ?? []
@@ -799,6 +814,84 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Staged review
+
+    /// Stages a line note instead of posting it.
+    ///
+    /// Posting each note the moment it is written — which is what this app did
+    /// — sends the author a separate notification per note and leaves a
+    /// half-finished review behind if one call fails. GitHub's own model is a
+    /// pending review: write the notes, then submit them together with a
+    /// verdict.
+    func stageComment(path: String, startLine: Int, endLine: Int, body: String) {
+        guard let session else { return }
+        session.data.draftComments.append(
+            DraftComment(path: path, line: endLine,
+                         startLine: startLine < endLine ? startLine : nil, body: body))
+        saveSession()
+    }
+
+    func removeDraft(_ draft: DraftComment) {
+        guard let session else { return }
+        session.data.draftComments.removeAll { $0.id == draft.id }
+        saveSession()
+    }
+
+    func updateDraft(_ draft: DraftComment, body: String) {
+        guard let session,
+              let i = session.data.draftComments.firstIndex(where: { $0.id == draft.id })
+        else { return }
+        session.data.draftComments[i].body = body
+        saveSession()
+    }
+
+    func setDraftReviewBody(_ body: String) {
+        guard let session else { return }
+        session.data.draftReviewBody = body
+        saveSession()
+    }
+
+    private func saveSession() {
+        guard let session else { return }
+        sessionStore.saveInBackground(session.data) { [weak self] error in
+            self?.errorBanner = "Failed to save session: \(error.localizedDescription)"
+        }
+    }
+
+    /// Sends every staged note and the verdict as one review.
+    func submitReview(_ verdict: ReviewVerdict) async {
+        guard let repoDir, let session, !isSubmittingReview else { return }
+        guard let head = currentHead, !head.isEmpty else {
+            errorBanner = "Cannot submit yet: still resolving the PR's head commit."
+            return
+        }
+        let drafts = session.data.draftComments
+        let body = session.data.draftReviewBody
+        guard !drafts.isEmpty || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || verdict != .comment else {
+            errorBanner = "Nothing to submit — write a note or pick a verdict."
+            return
+        }
+        isSubmittingReview = true
+        defer { isSubmittingReview = false }
+        do {
+            try await github.submitReview(repoDir: repoDir, number: session.data.pr.number,
+                                          commitID: head, verdict: verdict,
+                                          body: body, comments: drafts)
+            // Cleared only after GitHub accepted it: a failed submit must
+            // leave the afternoon's notes exactly where they were.
+            session.data.draftComments = []
+            session.data.draftReviewBody = ""
+            saveSession()
+            comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
+            reviews = await loadReviews(repoDir: repoDir, number: session.data.pr.number)
+            refreshNote = "Review submitted"
+            errorBanner = nil
+        } catch {
+            errorBanner = "Failed to submit review: \(error.localizedDescription)"
+        }
+    }
+
     func reply(to comment: ReviewComment, body: String) async {
         guard let repoDir, let session else { return }
         do {
@@ -847,6 +940,7 @@ final class AppModel: ObservableObject {
             worktreeNote = nil
             async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
             async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
+            async let reviewsTask = loadReviews(repoDir: repoDir, number: pr.number)
             // Re-fetching the head is part of building the full-context diff,
             // so refreshing is the same work as opening — doing it here too
             // fetched the same ref twice.
@@ -858,6 +952,7 @@ final class AppModel: ObservableObject {
             }
             comments = await commentsTask
             commits = await commitsTask
+            reviews = await reviewsTask
             let head = full?.head ?? currentHead
             currentHead = head
             // Keep the open file if it still exists in the refreshed diff.

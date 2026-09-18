@@ -54,9 +54,28 @@ final class AgentController: ObservableObject {
         } catch {
             session.agentState = .afterFailure(userCancelled: userCancelled, message: "\(label): \(error.localizedDescription)")
         }
+        // A run takes minutes; finishing used to be silent, so you either
+        // watched a spinner or came back later and guessed.
+        if !userCancelled {
+            RunNotifier.shared.runFinished(
+                label: label, pr: session.data.pr.number, title: session.data.pr.title,
+                outcome: Self.outcome(of: session.agentState, label: label))
+        }
         runStartedAt = nil
         model.sessionStore.saveInBackground(session.data) { [weak model] error in
             model?.errorBanner = "Failed to save session: \(error.localizedDescription)"
+        }
+    }
+
+    /// One line saying what the run produced, for the notification body.
+    private static func outcome(of state: AgentState, label: String) -> String {
+        if case .failed(let message) = state { return message }
+        switch label {
+        case "Reviewing", "Verifying": return "The review is ready."
+        case "Fixing": return "The fix is written — review the patch."
+        case "Explaining": return "The walkthrough is ready."
+        case "Clarifying": return "Your question has an answer."
+        default: return "Done."
         }
     }
 

@@ -4,9 +4,16 @@ import XCTest
 final class FakeProcessRunner: ProcessRunning, @unchecked Sendable {
     var responses: [ProcessResult] = []
     var calls: [(executable: String, arguments: [String])] = []
+    /// What was piped to stdin, for the calls that use `gh api --input -`.
+    var stdinPayloads: [Data] = []
     func run(_ executable: String, arguments: [String], currentDirectory: URL?) async throws -> ProcessResult {
         calls.append((executable, arguments))
         return responses.isEmpty ? ProcessResult(stdout: "", stderr: "", exitCode: 0) : responses.removeFirst()
+    }
+    func run(_ executable: String, arguments: [String], currentDirectory: URL?,
+             stdin: Data?) async throws -> ProcessResult {
+        if let stdin { stdinPayloads.append(stdin) }
+        return try await run(executable, arguments: arguments, currentDirectory: currentDirectory)
     }
 }
 
@@ -337,6 +344,159 @@ extension GitHubServiceTests {
         XCTAssertEqual(prs.first?.headRefOid, "bbb")
         XCTAssertEqual(prs.first?.baseRefOid, "aaa")
         XCTAssertTrue(GitHubService.prFields.contains("headRefOid"))
+    }
+
+    // MARK: - Reviews
+
+    func testFetchReviewsMapsVerdicts() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: """
+        [{"id": 1, "user": {"login": "alice"}, "state": "APPROVED", "body": "ship it",
+          "submitted_at": "2026-09-15T13:40:35Z"},
+         {"id": 2, "user": {"login": "bob"}, "state": "CHANGES_REQUESTED", "body": "no",
+          "submitted_at": "2026-09-16T13:40:35Z"}]
+        """, stderr: "", exitCode: 0)]
+        let reviews = try await GitHubService(runner: fake)
+            .fetchReviews(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+        XCTAssertEqual(reviews.count, 2)
+        XCTAssertTrue(reviews[0].isApproval)
+        XCTAssertEqual(reviews[0].label, "approved")
+        XCTAssertTrue(reviews[1].isBlocking)
+        XCTAssertEqual(reviews[1].label, "requested changes")
+    }
+
+    /// GitHub wraps inline notes in an empty COMMENTED review. Those carry no
+    /// verdict and no text, so showing them would be a row saying nothing.
+    func testAnEmptyCommentedReviewIsNotMeaningful() {
+        let envelope = PullRequestReview(id: 1, author: "a", state: "COMMENTED",
+                                         body: "  \n ", submittedAt: nil)
+        XCTAssertFalse(envelope.isMeaningful)
+        XCTAssertTrue(PullRequestReview(id: 2, author: "a", state: "COMMENTED",
+                                        body: "a real note", submittedAt: nil).isMeaningful)
+        // A verdict is meaningful even with no words attached.
+        XCTAssertTrue(PullRequestReview(id: 3, author: "a", state: "APPROVED",
+                                        body: "", submittedAt: nil).isMeaningful)
+    }
+
+    /// A deleted account has no login, and one odd field must not cost the
+    /// whole list.
+    func testReviewsSurviveAMissingAuthorAndState() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(
+            stdout: #"[{"id": 9, "user": null, "body": null, "submitted_at": null}]"#,
+            stderr: "", exitCode: 0)]
+        let reviews = try await GitHubService(runner: fake)
+            .fetchReviews(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7)
+        XCTAssertEqual(reviews.first?.author, "")
+        XCTAssertEqual(reviews.first?.state, "COMMENTED")
+    }
+
+    func testSubmitReviewSendsOneRequestWithEveryNote() async throws {
+        let fake = FakeProcessRunner()
+        let drafts = [
+            DraftComment(path: "a.swift", line: 12, body: "first"),
+            DraftComment(path: "b.swift", line: 40, startLine: 36, body: "second"),
+        ]
+        try await GitHubService(runner: fake).submitReview(
+            repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7, commitID: "deadbeef",
+            verdict: .requestChanges, body: "  needs work  ", comments: drafts)
+
+        // One call, not one per note.
+        XCTAssertEqual(fake.calls.count, 1)
+        XCTAssertEqual(fake.calls[0].arguments,
+                       ["api", "-X", "POST", "repos/{owner}/{repo}/pulls/7/reviews", "--input", "-"])
+
+        let payload = try XCTUnwrap(fake.stdinPayloads.first)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        XCTAssertEqual(json["event"] as? String, "REQUEST_CHANGES")
+        XCTAssertEqual(json["commit_id"] as? String, "deadbeef")
+        XCTAssertEqual(json["body"] as? String, "needs work")
+
+        let comments = try XCTUnwrap(json["comments"] as? [[String: Any]])
+        XCTAssertEqual(comments.count, 2)
+        XCTAssertEqual(comments[0]["path"] as? String, "a.swift")
+        XCTAssertEqual(comments[0]["line"] as? Int, 12)
+        // GitHub rejects start_line when it equals line, so a single-line note
+        // must not carry one.
+        XCTAssertNil(comments[0]["start_line"])
+        XCTAssertEqual(comments[1]["start_line"] as? Int, 36)
+        XCTAssertEqual(comments[1]["start_side"] as? String, "RIGHT")
+    }
+
+    /// An empty summary is omitted rather than sent as "", which GitHub shows
+    /// as a blank review body.
+    func testSubmitReviewOmitsAnEmptyBody() async throws {
+        let fake = FakeProcessRunner()
+        try await GitHubService(runner: fake).submitReview(
+            repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7, commitID: "abc",
+            verdict: .approve, body: "   ", comments: [])
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: try XCTUnwrap(fake.stdinPayloads.first)) as? [String: Any])
+        XCTAssertNil(json["body"])
+        XCTAssertEqual(json["event"] as? String, "APPROVE")
+    }
+
+    func testSubmitReviewThrowsWhatGitHubSaid() async {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(
+            stdout: "", stderr: "gh: Pull request review thread line must be part of the diff",
+            exitCode: 1)]
+        do {
+            try await GitHubService(runner: fake).submitReview(
+                repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 7, commitID: "abc",
+                verdict: .comment, body: "x", comments: [])
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("must be part of the diff"),
+                          error.localizedDescription)
+        }
+    }
+
+    private func review(_ author: String, _ state: String) -> PullRequestReview {
+        PullRequestReview(id: Int.random(in: 1...9_999_999), author: author,
+                          state: state, body: "", submittedAt: nil)
+    }
+
+    /// The case that produced a wrong answer on a real pull request: a
+    /// reviewer requested changes and later approved, and counting every
+    /// review ever submitted reported the PR as blocked.
+    func testTheLatestVerdictPerReviewerWins() {
+        let tally = ReviewTally.of([
+            review("bram", "CHANGES_REQUESTED"),
+            review("bram", "COMMENTED"),
+            review("bram", "APPROVED"),
+        ])
+        XCTAssertEqual(tally, ReviewTally(approvals: 1, blocking: 0))
+    }
+
+    /// A plain comment says nothing about whether the PR can merge.
+    func testACommentDoesNotChangeStanding() {
+        XCTAssertEqual(ReviewTally.of([review("a", "COMMENTED")]),
+                       ReviewTally(approvals: 0, blocking: 0))
+        XCTAssertEqual(ReviewTally.of([review("a", "APPROVED"), review("a", "COMMENTED")]),
+                       ReviewTally(approvals: 1, blocking: 0))
+    }
+
+    /// Dismissing a review removes that reviewer's standing — that is what it
+    /// is for.
+    func testDismissalClearsAVerdict() {
+        XCTAssertEqual(
+            ReviewTally.of([review("a", "CHANGES_REQUESTED"), review("a", "DISMISSED")]),
+            ReviewTally(approvals: 0, blocking: 0))
+    }
+
+    func testReviewersAreCountedIndependently() {
+        let tally = ReviewTally.of([
+            review("a", "APPROVED"),
+            review("b", "CHANGES_REQUESTED"),
+            review("c", "APPROVED"),
+            review("b", "CHANGES_REQUESTED"),
+        ])
+        XCTAssertEqual(tally, ReviewTally(approvals: 2, blocking: 1))
+    }
+
+    func testNoReviews() {
+        XCTAssertEqual(ReviewTally.of([]), ReviewTally())
     }
 
 }

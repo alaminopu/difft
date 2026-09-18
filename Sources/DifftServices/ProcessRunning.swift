@@ -11,6 +11,21 @@ public struct ProcessResult: Equatable, Sendable {
 
 public protocol ProcessRunning: Sendable {
     func run(_ executable: String, arguments: [String], currentDirectory: URL?) async throws -> ProcessResult
+    /// Same, with a body written to the child's stdin and the pipe closed.
+    ///
+    /// Needed for `gh api --input -`: a review payload carries free-form
+    /// markdown and a nested array of line notes, neither of which has an
+    /// `-f key=value` spelling.
+    func run(_ executable: String, arguments: [String], currentDirectory: URL?,
+             stdin: Data?) async throws -> ProcessResult
+}
+
+public extension ProcessRunning {
+    /// Runners with nothing to say to stdin — the test fakes — inherit this.
+    func run(_ executable: String, arguments: [String], currentDirectory: URL?,
+             stdin: Data?) async throws -> ProcessResult {
+        try await run(executable, arguments: arguments, currentDirectory: currentDirectory)
+    }
 }
 
 /// GUI apps launched from Finder inherit LaunchServices' minimal PATH, which
@@ -30,7 +45,14 @@ public func difftProcessEnvironment() -> [String: String] {
 
 public final class DefaultProcessRunner: ProcessRunning {
     public init() {}
-    public func run(_ executable: String, arguments: [String], currentDirectory: URL?) async throws -> ProcessResult {
+    public func run(_ executable: String, arguments: [String],
+                    currentDirectory: URL?) async throws -> ProcessResult {
+        try await run(executable, arguments: arguments,
+                      currentDirectory: currentDirectory, stdin: nil)
+    }
+
+    public func run(_ executable: String, arguments: [String], currentDirectory: URL?,
+                    stdin: Data?) async throws -> ProcessResult {
         try await withCheckedThrowingContinuation { cont in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -39,6 +61,8 @@ public final class DefaultProcessRunner: ProcessRunning {
             p.environment = difftProcessEnvironment()
             let out = Pipe(), err = Pipe()
             p.standardOutput = out; p.standardError = err
+            let input = stdin.map { _ in Pipe() }
+            if let input { p.standardInput = input }
 
             let drainQ = DispatchQueue(label: "com.difft.process-drain")
             var stdoutData = Data()
@@ -84,7 +108,17 @@ public final class DefaultProcessRunner: ProcessRunning {
                     cont.resume(returning: ProcessResult(stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus))
                 }
             }
-            do { try p.run() } catch { cont.resume(throwing: error) }
+            do {
+                try p.run()
+                if let input, let stdin {
+                    // Written after launch and closed immediately: a child
+                    // reading to EOF blocks forever otherwise, and a payload
+                    // larger than the pipe buffer would deadlock a
+                    // write-then-launch order.
+                    input.fileHandleForWriting.write(stdin)
+                    try? input.fileHandleForWriting.close()
+                }
+            } catch { cont.resume(throwing: error) }
         }
     }
 }

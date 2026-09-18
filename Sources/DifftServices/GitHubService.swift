@@ -188,6 +188,117 @@ public struct ReviewComment: Codable, Equatable, Identifiable, Sendable {
 }
 
 
+/// A submitted review: the verdict, not the line notes underneath it.
+///
+/// These live at `pulls/{n}/reviews` and are what decides whether a PR is
+/// blocked. The app read only the inline comments, so "someone requested
+/// changes" was the one thing about a pull request it could not tell you.
+public struct PullRequestReview: Codable, Equatable, Identifiable, Sendable {
+    public let id: Int
+    public let author: String
+    /// APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING.
+    public let state: String
+    public let body: String
+    public let submittedAt: String?
+
+    public init(id: Int, author: String, state: String, body: String, submittedAt: String?) {
+        self.id = id; self.author = author; self.state = state
+        self.body = body; self.submittedAt = submittedAt
+    }
+
+    public var isApproval: Bool { state == "APPROVED" }
+    public var isBlocking: Bool { state == "CHANGES_REQUESTED" }
+    /// A review with no verdict and no body is the envelope GitHub creates
+    /// around inline comments — the comments themselves are shown separately,
+    /// so an empty envelope is noise.
+    public var isMeaningful: Bool {
+        isApproval || isBlocking || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var label: String {
+        switch state {
+        case "APPROVED": return "approved"
+        case "CHANGES_REQUESTED": return "requested changes"
+        case "DISMISSED": return "review dismissed"
+        default: return "commented"
+        }
+    }
+}
+
+/// Where a pull request stands once every reviewer's latest word is counted.
+public struct ReviewTally: Equatable, Sendable {
+    public var approvals: Int
+    public var blocking: Int
+    public init(approvals: Int = 0, blocking: Int = 0) {
+        self.approvals = approvals; self.blocking = blocking
+    }
+
+    /// Only the newest verdict from each reviewer counts, which is GitHub's
+    /// own rule and the only one that gives the right answer: someone who
+    /// requests changes and later approves has approved. Counting every review
+    /// ever submitted reports the PR as blocked forever.
+    ///
+    /// A plain comment leaves a reviewer's standing untouched, and a dismissed
+    /// review removes it — that is what dismissing is for.
+    ///
+    /// - Parameter reviews: oldest first, as GitHub returns them.
+    public static func of(_ reviews: [PullRequestReview]) -> ReviewTally {
+        var standing: [String: String] = [:]
+        for review in reviews {
+            switch review.state {
+            case "APPROVED", "CHANGES_REQUESTED":
+                standing[review.author] = review.state
+            case "DISMISSED":
+                standing[review.author] = nil
+            default:
+                break
+            }
+        }
+        return ReviewTally(
+            approvals: standing.values.count { $0 == "APPROVED" },
+            blocking: standing.values.count { $0 == "CHANGES_REQUESTED" })
+    }
+}
+
+/// What submitting a review says about the pull request.
+public enum ReviewVerdict: String, CaseIterable, Identifiable, Sendable {
+    case comment = "COMMENT"
+    case approve = "APPROVE"
+    case requestChanges = "REQUEST_CHANGES"
+    public var id: Self { self }
+    public var label: String {
+        switch self {
+        case .comment: return "Comment"
+        case .approve: return "Approve"
+        case .requestChanges: return "Request changes"
+        }
+    }
+    public var detail: String {
+        switch self {
+        case .comment: return "Leave notes without a verdict."
+        case .approve: return "Sign off on these changes."
+        case .requestChanges: return "Block the PR until these are addressed."
+        }
+    }
+}
+
+/// One line note staged locally, not yet sent to GitHub.
+public struct DraftComment: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let path: String
+    public let line: Int
+    /// Start of a multi-line anchor; nil for a single line.
+    public let startLine: Int?
+    public var body: String
+    public let createdAt: Date
+
+    public init(id: UUID = UUID(), path: String, line: Int, startLine: Int? = nil,
+                body: String, createdAt: Date = Date()) {
+        self.id = id; self.path = path; self.line = line
+        self.startLine = startLine; self.body = body; self.createdAt = createdAt
+    }
+}
+
 /// One commit on a PR. GitHub's own commits tab shows message, author, date
 /// and sha with no per-commit stats, and the list endpoint carries none
 /// either, so neither does this.
@@ -435,6 +546,65 @@ public final class GitHubService: Sendable {
     }
 
     @discardableResult
+    /// Submitted reviews, oldest first.
+    public func fetchReviews(repoDir: URL, number: Int) async throws -> [PullRequestReview] {
+        let r = try await runner.run("gh", arguments: [
+            "api", "repos/{owner}/{repo}/pulls/\(number)/reviews?per_page=100", "--paginate",
+        ], currentDirectory: repoDir)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+        struct Raw: Codable {
+            struct User: Codable { let login: String? }
+            let id: Int; let user: User?; let state: String?
+            let body: String?; let submitted_at: String?
+        }
+        return try JSONDecoder().decode([Raw].self, from: Data(r.stdout.utf8)).map {
+            PullRequestReview(id: $0.id, author: $0.user?.login ?? "",
+                              state: $0.state ?? "COMMENTED", body: $0.body ?? "",
+                              submittedAt: $0.submitted_at)
+        }
+    }
+
+    /// Submits one review carrying every staged note at once.
+    ///
+    /// Posting notes one at a time — which is what the app did, and what the
+    /// `pulls/{n}/comments` endpoint does — sends the author a separate
+    /// notification per note and leaves a half-posted review behind if one
+    /// call fails. `POST /pulls/{n}/reviews` takes the whole batch and the
+    /// verdict together: one notification, and all of it or none.
+    public func submitReview(repoDir: URL, number: Int, commitID: String,
+                             verdict: ReviewVerdict, body: String,
+                             comments: [DraftComment]) async throws {
+        var payload: [String: Any] = [
+            "commit_id": commitID,
+            "event": verdict.rawValue,
+        ]
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { payload["body"] = trimmed }
+        payload["comments"] = comments.map { draft -> [String: Any] in
+            var entry: [String: Any] = [
+                "path": draft.path,
+                "line": draft.line,
+                "side": "RIGHT",
+                "body": draft.body,
+            ]
+            // GitHub rejects start_line when it equals line, so a single-line
+            // note must be sent without one.
+            if let start = draft.startLine, start < draft.line {
+                entry["start_line"] = start
+                entry["start_side"] = "RIGHT"
+            }
+            return entry
+        }
+        let json = try JSONSerialization.data(withJSONObject: payload)
+        // Piped in rather than passed as -f pairs: a note is free-form
+        // markdown and the nested comments array has no -f spelling.
+        let r = try await runner.run("gh", arguments: [
+            "api", "-X", "POST", "repos/{owner}/{repo}/pulls/\(number)/reviews",
+            "--input", "-",
+        ], currentDirectory: repoDir, stdin: json)
+        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+    }
+
     public func replyToComment(repoDir: URL, number: Int, commentID: Int,
                                body: String) async throws -> ReviewComment? {
         let r = try await runner.run("gh", arguments: [

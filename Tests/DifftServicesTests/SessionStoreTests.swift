@@ -55,4 +55,40 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(decoded.explanation)
     }
 
+    /// A review written over an afternoon has to survive closing the PR, and
+    /// the app quitting.
+    func testDraftReviewSurvivesARoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = SessionStore(directory: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var data = SessionData(pr: PullRequest(number: 3, title: "t", body: "", headRefName: "h",
+                                               authorLogin: "a"),
+                               repoDir: "/tmp/repo", viewedFiles: [], chat: [], findings: [])
+        data.draftComments = [DraftComment(path: "a.swift", line: 9, startLine: 7, body: "note")]
+        data.draftReviewBody = "summary"
+        try store.save(data)
+
+        let back = try XCTUnwrap(store.load(repo: "repo", prNumber: 3))
+        XCTAssertEqual(back.draftComments.count, 1)
+        XCTAssertEqual(back.draftComments[0].path, "a.swift")
+        XCTAssertEqual(back.draftComments[0].startLine, 7)
+        XCTAssertEqual(back.draftReviewBody, "summary")
+    }
+
+    /// Sessions written before drafts existed are already on disk.
+    func testSessionsWithoutDraftsStillDecode() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let json = """
+        {"pr": {"number": 4, "title": "t", "body": "", "headRefName": "h", "authorLogin": "a"},
+         "repoDir": "/tmp/repo", "viewedFiles": [], "chat": [], "findings": []}
+        """
+        try Data(json.utf8).write(to: dir.appendingPathComponent("repo-pr4.json"))
+        let back = try XCTUnwrap(SessionStore(directory: dir).load(repo: "repo", prNumber: 4))
+        XCTAssertTrue(back.draftComments.isEmpty)
+        XCTAssertEqual(back.draftReviewBody, "")
+    }
+
 }

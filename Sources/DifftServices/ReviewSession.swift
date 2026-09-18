@@ -101,13 +101,42 @@ public struct SessionData: Codable, Equatable, Sendable {
     public var reviewStamp: ReviewStamp?
     /// The PR walkthrough, kept so reopening a PR does not re-run the agent.
     public var explanation: DiffExplanation?
+    /// Line notes staged but not sent. Persisted, because a review written
+    /// over an afternoon should survive closing the PR — or the app.
+    public var draftComments: [DraftComment] = []
+    /// The summary written alongside the staged notes.
+    public var draftReviewBody: String = ""
+
     public init(pr: PullRequest, repoDir: String, viewedFiles: Set<String>,
                 chat: [ChatMessage], findings: [Finding],
                 reviewStamp: ReviewStamp? = nil,
-                explanation: DiffExplanation? = nil) {
+                explanation: DiffExplanation? = nil,
+                draftComments: [DraftComment] = [],
+                draftReviewBody: String = "") {
         self.pr = pr; self.repoDir = repoDir; self.viewedFiles = viewedFiles
         self.chat = chat; self.findings = findings
         self.reviewStamp = reviewStamp; self.explanation = explanation
+        self.draftComments = draftComments; self.draftReviewBody = draftReviewBody
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pr, repoDir, viewedFiles, chat, findings, reviewStamp, explanation
+        case draftComments, draftReviewBody
+    }
+
+    /// Sessions written before drafts existed are already on disk, and a
+    /// missing field must cost that field rather than the whole session.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pr = try c.decode(PullRequest.self, forKey: .pr)
+        repoDir = try c.decode(String.self, forKey: .repoDir)
+        viewedFiles = try c.decodeIfPresent(Set<String>.self, forKey: .viewedFiles) ?? []
+        chat = try c.decodeIfPresent([ChatMessage].self, forKey: .chat) ?? []
+        findings = try c.decodeIfPresent([Finding].self, forKey: .findings) ?? []
+        reviewStamp = try c.decodeIfPresent(ReviewStamp.self, forKey: .reviewStamp)
+        explanation = try c.decodeIfPresent(DiffExplanation.self, forKey: .explanation)
+        draftComments = try c.decodeIfPresent([DraftComment].self, forKey: .draftComments) ?? []
+        draftReviewBody = try c.decodeIfPresent(String.self, forKey: .draftReviewBody) ?? ""
     }
 }
 
@@ -140,7 +169,7 @@ public enum AgentState: Equatable, Sendable {
 /// The centre pane's mode. `.diff` covers both the PR overview and an open
 /// file — which of those shows is decided by `selectedFile`.
 public enum CenterPane: String, Codable, Sendable {
-    case diff, comments, commits, explain, review
+    case diff, comments, commits, explain, review, pending
 }
 
 @MainActor

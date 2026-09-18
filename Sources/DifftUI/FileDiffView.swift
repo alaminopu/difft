@@ -29,6 +29,9 @@ public struct FileDiffView: View {
             case row(SideBySideRow)
             case comment(ReviewComment)
             case finding(Finding)
+            /// Stands in for a run of unchanged rows until the reader asks for
+            /// them. `region` indexes `Built.hidden`.
+            case collapsed(region: Int, lines: Int)
         }
         /// Assigned once while building.
         ///
@@ -42,6 +45,12 @@ public struct FileDiffView: View {
 
     fileprivate struct Built: Sendable {
         var items: [DiffItem] = []
+        /// Rows folded away, by region. Kept here rather than rebuilt so
+        /// expanding a band is a splice, not another pass over the file.
+        var hidden: [Int: [DiffItem]] = [:]
+        /// Row id to the region hiding it, so focusing a line can open the
+        /// band that contains it instead of scrolling to nothing.
+        var regionOfRow: [Int: Int] = [:]
         var allRows: [SideBySideRow] = []
         var changeBlocks: [ChangeBlock] = []
         /// Widest line number in the file, in digits. Computed here because
@@ -76,6 +85,14 @@ public struct FileDiffView: View {
     /// A short explanation for an action that could not proceed, shown at the
     /// top of the diff and dismissed by the reader or the next file.
     @State private var notice: String?
+    /// Bands the reader has opened.
+    @State private var expandedRegions: Set<Int> = []
+    /// `built.items` with the opened bands spliced back in.
+    ///
+    /// Held rather than computed: the splice is O(items), and a computed
+    /// property would pay it on every body pass — which on a full-context diff
+    /// is the whole file, on every scroll tick.
+    @State private var shownItems: [DiffItem] = []
 
     public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
     public var onResolveComment: (ReviewComment) -> Void = { _ in }
@@ -85,6 +102,10 @@ public struct FileDiffView: View {
     /// which is what a single-commit diff wants — its line numbers are not
     /// the ones GitHub anchors PR comments to.
     public var onAddComment: ((Int, Int, String) -> Void)?
+    /// Stage into the pending review rather than posting.
+    public var onStageComment: ((Int, Int, String) -> Void)?
+    /// Notes already staged, so the composer can say what this one joins.
+    public var stagedCount: Int = 0
 
     public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
                 fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil,
@@ -93,11 +114,15 @@ public struct FileDiffView: View {
                 onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
                 onResolveComment: @escaping (ReviewComment) -> Void = { _ in },
                 onEditComment: ((ReviewComment) -> ((String) -> Void)?)? = nil,
-                onAddComment: ((Int, Int, String) -> Void)? = nil) {
+                onAddComment: ((Int, Int, String) -> Void)? = nil,
+                onStageComment: ((Int, Int, String) -> Void)? = nil,
+                stagedCount: Int = 0) {
         self.onReplyComment = onReplyComment
         self.onResolveComment = onResolveComment
         self.onEditComment = onEditComment
         self.onAddComment = onAddComment
+        self.onStageComment = onStageComment
+        self.stagedCount = stagedCount
         self.file = file; self._layout = layout; self._selection = selection
         self.fontSize = fontSize; self.focusLine = focusLine
         self.onFocused = onFocused; self.onAsk = onAsk
@@ -179,6 +204,35 @@ public struct FileDiffView: View {
             }
             items = merged
         }
+        // Fold the long unchanged runs away. Rows carrying a comment or a
+        // finding are pinned: they are the reason the reader opened the file.
+        let regions = CollapsedRegions.compute(rows: rows, pinned: Set(attachments.keys))
+        var hidden: [Int: [DiffItem]] = [:]
+        var regionOfRow: [Int: Int] = [:]
+        if !regions.isEmpty {
+            var linesIn: [Int: Int] = [:]
+            for region in regions {
+                linesIn[region.id] = region.count
+                for index in region.range { regionOfRow[rows[index].id] = region.id }
+            }
+            var folded: [DiffItem] = []
+            folded.reserveCapacity(items.count)
+            var banded = Set<Int>()
+            for item in items {
+                guard case .row(let r) = item.kind, let region = regionOfRow[r.id] else {
+                    folded.append(item)
+                    continue
+                }
+                hidden[region, default: []].append(item)
+                if banded.insert(region).inserted {
+                    folded.append(DiffItem(id: next(),
+                                           kind: .collapsed(region: region,
+                                                            lines: linesIn[region] ?? 0)))
+                }
+            }
+            items = folded
+        }
+
         // Runs of consecutive changed rows for the overview rail.
         var blocks: [ChangeBlock] = []
         let total = CGFloat(max(rows.count, 1))
@@ -199,7 +253,8 @@ public struct FileDiffView: View {
                                       extent: CGFloat(i - start) / total,
                                       color: color))
         }
-        return Built(items: items, allRows: rows, changeBlocks: blocks,
+        return Built(items: items, hidden: hidden, regionOfRow: regionOfRow,
+                     allRows: rows, changeBlocks: blocks,
                      digits: DiffMetrics.digits(for: file.maxLineNumber), key: key)
     }
 
@@ -239,8 +294,12 @@ public struct FileDiffView: View {
                     ScrollView(.vertical) {
                         let language = HighlightService.language(forPath: file.path)
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(built.items) { item in
+                            ForEach(shownItems) { item in
                                 switch item.kind {
+                                case .collapsed(let region, let lines):
+                                    CollapsedBandView(lines: lines, metrics: metrics) {
+                                        expandedRegions.insert(region)
+                                    }
                                 case .hunkHeader(_, let text):
                                     HunkHeaderView(text: text, metrics: metrics)
                                 case .finding(let f):
@@ -334,9 +393,12 @@ public struct FileDiffView: View {
                     // it whenever the built rows (or the target) change.
                     .onChange(of: built.key, initial: true) { _, _ in
                         // Another file, or another layout: the recorded row
-                        // frames describe rows that no longer exist.
+                        // frames describe rows that no longer exist, and the
+                        // bands the reader opened were in the previous file.
                         rowFrames.reset()
                         notice = nil
+                        expandedRegions = []
+                        shownItems = built.items
                         guard !built.allRows.isEmpty else { return }
                         if focusLine != nil {
                             focusIfNeeded(proxy)
@@ -345,6 +407,7 @@ public struct FileDiffView: View {
                         }
                     }
                     .onChange(of: focusLine) { focusIfNeeded(proxy) }
+                    .onChange(of: expandedRegions) { _, _ in respliceItems() }
                 }
                 .overlay {
                     if layout == .sideBySide, let leftW = leftW {
@@ -361,12 +424,18 @@ public struct FileDiffView: View {
             }
             .copyable(selection.map { [SelectionLogic.selectedText(rows: built.allRows, selection: $0)] } ?? [])
             .sheet(item: $composing) { target in
-                NewCommentSheet(path: file.path, target: target) { body in
-                    onAddComment?(target.startLine, target.endLine, body)
-                    composing = nil
-                } onCancel: {
-                    composing = nil
-                }
+                NewCommentSheet(
+                    path: file.path, target: target,
+                    onStage: { body in
+                        onStageComment?(target.startLine, target.endLine, body)
+                        composing = nil
+                    },
+                    onSend: { body in
+                        onAddComment?(target.startLine, target.endLine, body)
+                        composing = nil
+                    },
+                    onCancel: { composing = nil },
+                    stagedCount: stagedCount)
             }
             .task(id: buildKey) {
                 // Off the main actor: a big file builds in background and pops
@@ -470,8 +539,70 @@ public struct FileDiffView: View {
             ?? built.allRows.first { ($0.left ?? $0.right)?.oldNumber == line }
         guard let row else { return }
         selection = LineSelection(anchor: row.id, head: row.id)
+        // An unchanged line named by a finding or a walkthrough anchor may be
+        // folded away; scrolling to a row that is not rendered does nothing at
+        // all, so open its band first.
+        if let region = built.regionOfRow[row.id], !expandedRegions.contains(region) {
+            expandedRegions.insert(region)
+            respliceItems()
+        }
         withAnimation { proxy.scrollTo("r\(row.id)", anchor: .center) }
         onFocused()
+    }
+
+    /// Puts the opened bands' rows back in place.
+    private func respliceItems() {
+        guard !expandedRegions.isEmpty else {
+            shownItems = built.items
+            return
+        }
+        var result: [DiffItem] = []
+        result.reserveCapacity(built.items.count)
+        for item in built.items {
+            guard case .collapsed(let region, _) = item.kind,
+                  expandedRegions.contains(region) else {
+                result.append(item)
+                continue
+            }
+            result.append(contentsOf: built.hidden[region] ?? [])
+        }
+        shownItems = result
+    }
+}
+
+/// Stands in for a run of unchanged lines.
+///
+/// A full-context diff puts the whole file on screen, and on a typical commit
+/// around 95% of it is untouched. This keeps every line one click away while
+/// letting the changes be the thing you actually see.
+struct CollapsedBandView: View {
+    let lines: Int
+    let metrics: DiffMetrics
+    let expand: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: expand) {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "chevron.down.circle")
+                    .imageScale(.small)
+                    .frame(width: metrics.totalGutter, alignment: .center)
+                Text("\(lines) unchanged line\(lines == 1 ? "" : "s")")
+                    .font(Typography.meta)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.vertical, Spacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovering ? Palette.hover : Palette.surface)
+            .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Show these lines")
+        .accessibilityLabel("Show \(lines) unchanged lines")
     }
 }
 
@@ -1060,9 +1191,17 @@ struct CommentTarget: Identifiable, Equatable {
 struct NewCommentSheet: View {
     let path: String
     let target: CommentTarget
+    /// Staged into the pending review.
+    var onStage: (String) -> Void
+    /// Posted on its own, the way a one-line "typo here" should be.
     var onSend: (String) -> Void
     var onCancel: () -> Void
+    /// How many notes are already waiting, so the primary action can say what
+    /// it is joining.
+    var stagedCount: Int = 0
     @State private var body_ = ""
+
+    private var trimmed: String { body_.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     /// "file.py:42" or "file.py:42-50", so it is unambiguous where this lands.
     private var targetLabel: String {
@@ -1093,15 +1232,21 @@ struct NewCommentSheet: View {
             HStack {
                 // The most common failure is picking a line GitHub does not
                 // consider part of the diff, so say where it will land.
-                Text("Posts to GitHub on the PR's head commit.")
+                Text("Anchors to the PR's head commit.")
                     .font(Typography.meta).foregroundStyle(.secondary)
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Comment") { onSend(body_.trimmingCharacters(in: .whitespacesAndNewlines)) }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                // Posting on its own is still right for a one-line "typo
+                // here"; everything else belongs in the review.
+                Button("Post now") { onSend(trimmed) }
+                    .disabled(trimmed.isEmpty)
+                Button(stagedCount == 0 ? "Add to review" : "Add to review (\(stagedCount + 1))") {
+                    onStage(trimmed)
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .buttonStyle(.borderedProminent)
+                .disabled(trimmed.isEmpty)
             }
         }
         .padding(Spacing.lg)

@@ -60,11 +60,16 @@ struct PRCommentsView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if threads.isEmpty {
+            // Verdicts first: whether the PR is blocked outranks any
+            // individual note under it.
+            if !model.reviews.isEmpty { VerdictList(reviews: model.reviews) }
+            if threads.isEmpty, model.reviews.isEmpty {
                 ContentUnavailableView("No review comments",
                                        systemImage: "bubble.left.and.bubble.right",
                                        description: Text("Nobody has commented on this pull request yet."))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if threads.isEmpty {
+                Spacer(minLength: 0)
             } else if visible.isEmpty {
                 ContentUnavailableView("Nothing matches",
                                        systemImage: "line.3.horizontal.decrease.circle",
@@ -313,5 +318,50 @@ struct DiffHunkPreview: View {
         if line.hasPrefix("+") { return Palette.diffAddFill(dark) }
         if line.hasPrefix("-") { return Palette.diffRemoveFill(dark) }
         return .clear
+    }
+}
+
+
+/// Submitted verdicts, newest last, above the line notes.
+private struct VerdictList: View {
+    let reviews: [PullRequestReview]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            ForEach(reviews) { review in
+                HStack(alignment: .top, spacing: Spacing.sm) {
+                    Image(systemName: icon(review))
+                        .foregroundStyle(tint(review))
+                        .imageScale(.small)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: Spacing.xxs) {
+                        HStack(spacing: Spacing.xs) {
+                            Text(review.author).font(.callout.weight(.semibold))
+                            Text(review.label).font(Typography.meta).foregroundStyle(tint(review))
+                            if let at = review.submittedAt {
+                                Text(Dates.age(iso: at))
+                                    .font(Typography.meta).foregroundStyle(.tertiary)
+                            }
+                        }
+                        if !review.body.isEmpty { MarkdownBodyView(text: review.body) }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(Spacing.sm)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(tint(review).opacity(0.07), in: RoundedRectangle(cornerRadius: Radius.sm))
+            }
+        }
+        .padding(.horizontal, Spacing.lg)
+        .padding(.vertical, Spacing.md)
+    }
+
+    private func icon(_ r: PullRequestReview) -> String {
+        r.isApproval ? "checkmark.seal.fill"
+            : r.isBlocking ? "xmark.octagon.fill" : "bubble.left"
+    }
+
+    private func tint(_ r: PullRequestReview) -> Color {
+        r.isApproval ? .green : r.isBlocking ? .red : .secondary
     }
 }

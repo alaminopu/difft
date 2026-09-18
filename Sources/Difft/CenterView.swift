@@ -126,6 +126,8 @@ struct PROverviewView: View {
                     CommentsButton(session: session)
                     CommitsButton(session: session)
                     FindingsButton(session: session)
+                    PendingReviewButton(session: session)
+                    VerdictChips()
                     Spacer()
                     if let note = model.worktreeNote {
                         Label(note, systemImage: "exclamationmark.triangle")
@@ -209,6 +211,8 @@ struct FileDiffContainer: View {
             ExplainView(session: session, controller: model.agent)
         case .review:
             ReviewView(session: session, controller: model.agent)
+        case .pending:
+            PendingReviewView(session: session)
         case .diff:
             diffOrOverview
         }
@@ -240,7 +244,12 @@ struct FileDiffContainer: View {
                          onAddComment: { start, end, body in
                              Task { await model.addComment(path: file.path, startLine: start,
                                                            endLine: end, body: body) }
-                         })
+                         },
+                         onStageComment: { start, end, body in
+                             model.stageComment(path: file.path, startLine: start,
+                                                endLine: end, body: body)
+                         },
+                         stagedCount: session.data.draftComments.count)
             }
                 .id(file.path) // reset scroll + selection per file
                 .onChange(of: file.path) { selection = nil }
@@ -602,6 +611,59 @@ struct OverviewDigest: View {
 
 /// Review state beside the comment and commit counts, so the pane has a way in
 /// from the page you land on rather than only the View menu and the side panel.
+/// Whether anyone has approved or blocked the PR.
+///
+/// These verdicts live at `pulls/{n}/reviews`, separate from the inline notes
+/// the app already showed — so "someone requested changes" was the one thing
+/// about a pull request Difft could not tell you.
+struct VerdictChips: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let tally = ReviewTally.of(model.reviews)
+        HStack(spacing: Spacing.xs) {
+            if tally.blocking > 0 {
+                chip("\(tally.blocking) blocking", "xmark.octagon", .red)
+            }
+            if tally.approvals > 0 {
+                chip("\(tally.approvals) approved", "checkmark.seal", .green)
+            }
+        }
+    }
+
+    private func chip(_ text: String, _ icon: String, _ tint: Color) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(tint)
+            .padding(.horizontal, Spacing.xs + 1)
+            .padding(.vertical, 1)
+            .background(tint.opacity(0.14), in: Capsule())
+    }
+}
+
+/// Opens the staged notes. Hidden until there are some — an empty pane is not
+/// worth a button on the overview.
+struct PendingReviewButton: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var session: ReviewSession
+
+    var body: some View {
+        let count = session.data.draftComments.count
+        if count > 0 {
+            Button {
+                model.closeCommit()
+                session.pane = .pending
+            } label: {
+                Label("\(count) staged", systemImage: "square.and.pencil")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Notes waiting to be submitted as one review (\u{21E7}\u{2318}Y)")
+        }
+    }
+}
+
 struct FindingsButton: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var session: ReviewSession

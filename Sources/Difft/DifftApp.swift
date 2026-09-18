@@ -42,6 +42,7 @@ struct DifftApp: App {
                 .environmentObject(highlighter)
                 .task { await model.checkTools() }
                 .task { await model.loadCurrentUser() }
+                .onAppear { RunNotifier.shared.start() }
                 .frame(minWidth: 1100, minHeight: 700)
                 .preferredColorScheme(appearance.colorScheme)
         }
@@ -81,6 +82,13 @@ struct DifftCommands: Commands {
                 Task { await model.explainDiff() }
             }
             .keyboardShortcut("e", modifiers: [.command, .shift])
+            .disabled(model.session == nil)
+
+            Button("Your Review") {
+                model.closeCommit()
+                model.session?.pane = .pending
+            }
+            .keyboardShortcut("y", modifiers: [.command, .shift])
             .disabled(model.session == nil)
 
             Button("Review Findings") {
