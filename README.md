@@ -1,8 +1,9 @@
-<img src="docs/icon.png" width="96" alt="">
+<h1 align="center">
+  <img src="docs/icon.png" width="88" alt=""><br>
+  Difft
+</h1>
 
-# Difft
-
-A native macOS app for reviewing GitHub pull requests.
+<p align="center">A native macOS app for reviewing GitHub pull requests.</p>
 
 Three lines of context rarely tell you whether a change is correct. Difft shows every changed file in full, with the review conversation on the lines it is about, and keeps track of what you still have to look at.
 
