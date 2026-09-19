@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="96" alt="">
+
 # Difft
 
 A native macOS app for reviewing GitHub pull requests.
@@ -15,9 +17,20 @@ brew install --cask difft
 xattr -dr com.apple.quarantine /Applications/Difft.app
 ```
 
-Or [download the latest release](https://github.com/alaminopu/difft/releases/latest), drag it to Applications, and run the last line.
+Or [download the latest release](https://github.com/alaminopu/difft/releases/latest), unzip it, drag Difft to Applications, and run the last line.
 
-Difft is ad-hoc signed, not notarized, so macOS quarantines it until that flag is cleared. The `xattr` step is needed after every upgrade.
+To upgrade:
+
+```sh
+brew update && brew upgrade --cask difft
+xattr -dr com.apple.quarantine /Applications/Difft.app
+```
+
+Why the `xattr` line: Difft is signed with the author's Apple Development certificate and runs under the hardened runtime, but it is not notarized, which takes a paid Developer ID. macOS quarantines anything downloaded that is not notarized, and that line clears the flag. It is needed after every install and upgrade. You can check what you are clearing it for:
+
+```sh
+codesign -dvv /Applications/Difft.app   # TeamIdentifier=4477488F8N
+```
 
 **Requires** macOS 14+, [`gh`](https://cli.github.com) signed in, and a local clone of the repository. Difft checks at launch and says what is missing.
 
@@ -95,10 +108,13 @@ Single-letter keys act on the diff, so click in it once first. Right-click works
 ## Development
 
 ```sh
-swift test        # no network or CLI needed
-swift run Difft   # dev build
-scripts/release.sh 0.4.1
+swift test                 # no network or CLI needed
+swift run Difft            # dev build
+scripts/package.sh         # dist/Difft.app, signed
+scripts/release.sh 0.4.2   # the same, zipped for a release
 ```
+
+Packaging signs with the first Developer ID or Apple Development identity in your keychain, and ad-hoc when there is none. `DIFFT_SIGN_IDENTITY` picks one, or `-` forces ad-hoc. A build you package yourself is never quarantined, so `cp -R dist/Difft.app /Applications/` is all it needs.
 
 Four targets: `DifftCore` (diff model and parsing), `DifftServices` (subprocesses, sessions, GitHub), `DifftUI` (the renderer), `Difft` (the app).
 
@@ -109,3 +125,7 @@ DIFFT_OPEN_PR=1135 DIFFT_OPEN_PATH=form/main.py DIFFT_OPEN_LINE=120 swift run Di
 ```
 
 State lives in `~/Library/Application Support/Difft/` and survives relaunches.
+
+## License
+
+[MIT](LICENSE). The bundled [Highlightr](Vendor/Highlightr/LICENSE) and highlight.js keep their own licenses, and JetBrains Mono is under the [OFL](Sources/DifftUI/Resources/Fonts/OFL.txt).

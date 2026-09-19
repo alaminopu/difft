@@ -11,10 +11,10 @@ cask "difft" do
 
   app "Difft.app"
 
-  # Difft is ad-hoc signed rather than notarized, so macOS quarantines it and
-  # Gatekeeper refuses to open it. Install with --no-quarantine. A cask that
-  # cleared the flag itself would be defeating Gatekeeper on the user's behalf
-  # without them asking.
+  # Difft is signed with an Apple Development certificate rather than a
+  # notarized Developer ID, so macOS quarantines it and Gatekeeper refuses to
+  # open it. Install with --no-quarantine. A cask that cleared the flag itself
+  # would be defeating Gatekeeper on the user's behalf without them asking.
 
   zap trash: [
     "~/Library/Application Support/Difft",

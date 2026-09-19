@@ -60,8 +60,36 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature so Gatekeeper runs it locally without complaints.
-codesign --force --deep -s - "$APP"
+# Sign with an Apple-issued identity when the keychain has one, preferring a
+# Developer ID (the only kind Gatekeeper accepts on other people's Macs) over
+# Apple Development. Picked by hash, not name: a renewed certificate keeps its
+# name, so the expired one beside it makes the name ambiguous to codesign.
+# Set DIFFT_SIGN_IDENTITY to choose one, or to "-" to force ad-hoc.
+IDENTITY="${DIFFT_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ]; then
+  IDENTITIES="$(security find-identity -v -p codesigning)"
+  for kind in "Developer ID Application" "Apple Development"; do
+    IDENTITY="$(echo "$IDENTITIES" | awk -v kind="\"$kind:" 'index($0, kind) { print $2; exit }')"
+    [ -n "$IDENTITY" ] && break
+  done
+fi
+
+# Highlightr runs highlight.js in JavaScriptCore, which only gets its JIT with
+# this entitlement, however the app is signed. A regex-heavy script measured
+# 0.11s with it and 1.9s without.
+ENTITLEMENTS="scripts/Difft.entitlements"
+
+if [ -n "$IDENTITY" ] && [ "$IDENTITY" != "-" ]; then
+  # Hardened runtime and a secure timestamp are what notarization asks for,
+  # and cost nothing when the certificate cannot be notarized.
+  codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS" -s "$IDENTITY" "$APP"
+else
+  # Ad-hoc signature so Gatekeeper runs it locally without complaints.
+  IDENTITY="ad-hoc"
+  codesign --force --deep --entitlements "$ENTITLEMENTS" -s - "$APP"
+fi
+codesign --verify --deep --strict "$APP"
 
 echo "Packaged: $APP ($VERSION)"
+echo "Signed:   $(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1 | grep . || echo "$IDENTITY")"
 echo "Install:  cp -R $APP /Applications/"
