@@ -75,6 +75,17 @@ final class HighlightServiceTests: XCTestCase {
         XCTAssertEqual(HighlightService.language(forPath: "x.YML"), "yaml")
         XCTAssertNil(HighlightService.language(forPath: "Package.resolved"))
     }
+
+    /// React components had no entry and rendered as plain text.
+    func testTSXAndJSXAreHighlighted() {
+        XCTAssertEqual(HighlightService.language(forPath: "src/app.tsx"), "typescript")
+        XCTAssertEqual(HighlightService.language(forPath: "src/App.jsx"), "javascript")
+    }
+
+    func testFilesKnownByNameRatherThanExtension() {
+        XCTAssertEqual(HighlightService.language(forPath: "docker/Dockerfile"), "dockerfile")
+        XCTAssertEqual(HighlightService.language(forPath: "Makefile"), "makefile")
+    }
 }
 
 extension HighlightServiceTests {

@@ -127,8 +127,63 @@ struct TopBar: View {
         }
         .padding(.trailing, Spacing.md)
         .frame(height: Chrome.topBar)
+        // Behind the controls, so it only receives what they do not take.
+        .background(TitlebarBehaviour())
         .background(Palette.chrome)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
+}
+
+/// Gives the tab bar the two things a titlebar does with the mouse.
+///
+/// The bar is the app's own view under a transparent titlebar, and it is
+/// taller than the strip AppKit still treats as one — so below that strip a
+/// double-click did nothing and a drag did not move the window, unlike every
+/// other window on the Mac. Both are handled here, and the double-click obeys
+/// the system setting rather than assuming zoom.
+private struct TitlebarBehaviour: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { BarView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class BarView: NSView {
+        /// The press a drag would start from, kept until the pointer moves.
+        private var pressed: NSEvent?
+
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            guard event.clickCount == 2 else {
+                // Not dragged yet. Starting the drag on the press itself told
+                // AppKit the zoomed frame was now the user's own, so the next
+                // double-click had no size to go back to.
+                pressed = event
+                return
+            }
+            pressed = nil
+            // System Settings › Desktop & Dock › "Double-click a window's
+            // title bar to". Unset means the default, which is zoom.
+            let global = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
+            switch global?["AppleActionOnDoubleClick"] as? String {
+            case "Minimize": window.performMiniaturize(nil)
+            case "None": break
+            default: window.performZoom(nil)
+            }
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = pressed else { return }
+            pressed = nil
+            window?.performDrag(with: start)
+        }
+
+        override func mouseUp(with event: NSEvent) { pressed = nil }
+
+        // A non-opaque view says yes to this by default, and AppKit then moves
+        // the window itself without ever sending mouseDown — so the
+        // double-click above was never seen. Dragging is done by hand instead.
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        // A click here should not first have to make the window key.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 }
 

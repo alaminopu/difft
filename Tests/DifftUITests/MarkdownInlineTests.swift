@@ -88,4 +88,13 @@ extension MarkdownInlineTests {
                                            repoSlug: "alaminopu/difft")
         XCTAssertEqual(String(attr.characters), "Fixed in d59f520cc.")
     }
+
+    func testListLinesGetBulletsAndTaskBoxes() {
+        XCTAssertEqual(MarkdownBodyView.listMarker("- [ ] Bug fix"), "\u{2610}  Bug fix")
+        XCTAssertEqual(MarkdownBodyView.listMarker("- [x] New feature"), "\u{2611}  New feature")
+        XCTAssertEqual(MarkdownBodyView.listMarker("  * nested"), "  \u{2022}  nested")
+        // Not a list: a hyphenated word, a rule, prose.
+        XCTAssertEqual(MarkdownBodyView.listMarker("-flag"), "-flag")
+        XCTAssertEqual(MarkdownBodyView.listMarker("plain prose"), "plain prose")
+    }
 }

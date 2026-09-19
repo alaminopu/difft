@@ -910,11 +910,25 @@ extension MarkdownBodyView {
                 flush()
                 chunks.append(Chunk(text: heading, isHeading: true))
             } else {
-                para.append(line)
+                para.append(Self.listMarker(line))
             }
         }
         flush()
         return chunks
+    }
+
+    /// Bullets and task boxes for list lines. Inline-only markdown parsing
+    /// leaves "- [ ] Bug fix" exactly as typed, and a PR template's checklist
+    /// read as a column of punctuation.
+    static func listMarker(_ line: String) -> String {
+        let indent = line.prefix { $0 == " " || $0 == "\t" }
+        let rest = line.dropFirst(indent.count)
+        guard rest.hasPrefix("- ") || rest.hasPrefix("* ") || rest.hasPrefix("+ ") else { return line }
+        let item = rest.dropFirst(2)
+        let lowered = item.prefix(4).lowercased()
+        if lowered.hasPrefix("[ ] ") { return indent + "\u{2610}  " + item.dropFirst(4) }
+        if lowered.hasPrefix("[x] ") { return indent + "\u{2611}  " + item.dropFirst(4) }
+        return indent + "\u{2022}  " + item
     }
 }
 

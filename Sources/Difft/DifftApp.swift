@@ -247,7 +247,21 @@ enum DebugLaunch {
         for _ in 0..<60 where model.prs.isEmpty {
             try? await Task.sleep(for: .milliseconds(500))
         }
+        if let size = env["DIFFT_WINDOW"]?.split(separator: "x").compactMap({ Double($0) }), size.count == 2,
+           let window = NSApp.windows.first(where: { $0.isVisible }) {
+            let screen = window.screen?.visibleFrame ?? .zero
+            window.setFrame(NSRect(x: screen.midX - size[0] / 2, y: screen.midY - size[1] / 2,
+                                   width: size[0], height: size[1]), display: true)
+        }
+        // An older PR is not on the first page; a bare number finds it.
+        if !model.prs.contains(where: { $0.number == number }) {
+            model.prSearch = String(number)
+            for _ in 0..<40 where !model.prs.contains(where: { $0.number == number }) {
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
         guard let pr = model.prs.first(where: { $0.number == number }) else { return }
+        if env["DIFFT_LIST_ONLY"] != nil { return }
         await model.openPR(pr)
         if let index = env["DIFFT_OPEN_FILE"].flatMap(Int.init), model.files.indices.contains(index) {
             model.open(file: model.files[index].path)

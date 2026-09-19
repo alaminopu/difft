@@ -93,10 +93,28 @@ public final class HighlightService: ObservableObject {
         "rb": "ruby", "go": "go", "rs": "rust", "java": "java", "kt": "kotlin",
         "css": "css", "html": "html", "json": "json", "yml": "yaml", "yaml": "yaml",
         "md": "markdown", "sh": "bash", "vue": "html", "c": "c", "cpp": "cpp", "h": "c",
+        // TSX and JSX had no entry, so every React component rendered as
+        // plain text — in a TypeScript repository, most of the diff.
+        "tsx": "typescript", "mts": "typescript", "cts": "typescript",
+        "jsx": "javascript", "mjs": "javascript", "cjs": "javascript",
+        "scss": "scss", "less": "less", "xml": "xml", "svg": "xml", "plist": "xml",
+        "toml": "ini", "ini": "ini", "sql": "sql", "php": "php", "cs": "csharp",
+        "m": "objectivec", "mm": "objectivec", "hpp": "cpp", "cc": "cpp",
+        "kts": "kotlin", "scala": "scala", "dart": "dart", "lua": "lua", "r": "r",
+        "ex": "elixir", "exs": "elixir", "hs": "haskell", "pl": "perl", "zsh": "bash",
+        "bash": "bash", "graphql": "graphql", "gql": "graphql", "proto": "protobuf",
+        "tf": "ini", "gradle": "gradle", "cmake": "cmake",
+    ]
+
+    /// Files known by name rather than by extension.
+    private static let languagesByName: [String: String] = [
+        "dockerfile": "dockerfile", "makefile": "makefile", "gemfile": "ruby",
+        "rakefile": "ruby", "podfile": "ruby", "cmakelists.txt": "cmake",
     ]
 
     public static func language(forPath path: String) -> String? {
         languagesByExtension[(path as NSString).pathExtension.lowercased()]
+            ?? languagesByName[(path as NSString).lastPathComponent.lowercased()]
     }
 
     /// Longest line handed to highlight.js.
