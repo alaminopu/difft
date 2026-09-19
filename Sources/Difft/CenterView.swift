@@ -14,222 +14,319 @@ struct CenterView: View {
             // file list, or j/k stepping below) wouldn't otherwise trigger a re-render of a
             // view observing only AppModel, since ReviewSession is a nested ObservableObject.
             FileDiffContainer(session: session, onAsk: onAsk)
+        } else if model.repoDir == nil {
+            HomeView()
         } else {
-            ContentUnavailableView("Pick a PR", systemImage: "arrow.triangle.pull")
+            PullRequestsView()
         }
     }
 }
 
-/// The way back to the PR overview, in the leading position of every
-/// centre-pane header. A bare xmark on the trailing edge read as "dismiss"
-/// rather than "go up a level", so it says where it goes.
-struct OverviewBackButton: View {
+/// Header above an open file's diff: where it is, how big the change is, how
+/// to move on, and the one thing you do to a file — mark it viewed.
+struct FileHeaderBar: View {
     @EnvironmentObject var model: AppModel
+    let file: FileDiff
+    @ObservedObject var session: ReviewSession
+    @Binding var layout: DiffLayout
 
     var body: some View {
-        Button {
-            model.showOverview()
-        } label: {
-            Label("Overview", systemImage: "chevron.left").font(.callout)
+        let parts = file.path.split(separator: "/").map(String.init)
+        let index = model.files.firstIndex { $0.path == file.path } ?? 0
+        let isViewed = session.data.viewedFiles.contains(file.path)
+        PaneHeader {
+            // One Text, so a long path truncates once at the head instead of
+            // each segment losing its own middle.
+            (Text(parts.dropLast().map { $0 + " / " }.joined()).foregroundColor(Palette.textTertiary)
+             + Text(parts.last ?? "").fontWeight(.medium).foregroundColor(Palette.textStrong))
+            .font(.system(size: 12.5, design: .monospaced))
+            .lineLimit(1).truncationMode(.head)
+            .layoutPriority(-1)
+            .contextMenu { FileMenu(file: file, isViewed: isViewed) }
+            if case .renamed(let from) = file.kind {
+                Text("renamed from \(from)")
+                    .font(Typography.meta).foregroundStyle(Palette.textTertiary)
+                    .lineLimit(1).truncationMode(.head)
+            }
+            HStack(spacing: 6) {
+                Text("+\(file.additions)").foregroundStyle(Palette.addedText)
+                Text("\u{2212}\(file.deletions)").foregroundStyle(Palette.removedText)
+            }
+            .font(.system(size: 12, design: .monospaced))
+            .fixedSize()
+        } trailing: {
+            Text("\(index + 1) of \(model.files.count)")
+                .font(Typography.metaDigits).foregroundStyle(Palette.textTertiary)
+                .fixedSize()
+            HStack(spacing: 0) {
+                stepButton("chevron.up", help: "Previous file (K)", enabled: index > 0) {
+                    model.stepFile(-1)
+                }
+                Rectangle().fill(Palette.cardBorder).frame(width: 1, height: 26)
+                stepButton("chevron.down", help: "Next file (J)",
+                           enabled: index < model.files.count - 1) { model.stepFile(1) }
+            }
+            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.cardBorder) }
+            SegmentedControl(selection: $layout,
+                             options: [(.sideBySide, "Split"), (.unified, "Unified")])
+            if isViewed {
+                Button { model.markViewed(file.path, viewed: false) } label: {
+                    Label("Viewed", systemImage: "checkmark")
+                }
+                .buttonStyle(SecondaryButtonStyle(tint: Palette.addedText))
+                .help("Mark as not viewed (V)")
+            } else {
+                Button("Mark viewed") { model.toggleViewedAndAdvance() }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .help("Mark this file viewed and open the next one (V)")
+            }
+        }
+    }
+
+    private func stepButton(_ icon: String, help: String, enabled: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Palette.textSecondary)
+                .frame(width: 30, height: 26)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Color.accentColor)
-        .help("Back to the pull request overview (\u{2318}0)")
-        .accessibilityLabel("Back to pull request overview")
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
-/// Slim header above an open file's diff: name, directory, counts, and the
-/// way back to the PR overview.
-struct FileHeaderBar: View {
-    let file: FileDiff
-    var isRefreshing: Bool = false
-    var onRefresh: () -> Void = {}
-    var onClose: () -> Void
-
-    var body: some View {
-        let name = String(file.path.split(separator: "/").last ?? "")
-        let dir = file.path.split(separator: "/").dropLast().joined(separator: "/")
-        HStack(spacing: 8) {
-            OverviewBackButton()
-            Divider().frame(height: 14)
-            Image(systemName: "doc.text")
-                .foregroundStyle(.secondary)
-                .imageScale(.small)
-            Text(name).font(Typography.fileName)
-            if !dir.isEmpty {
-                Text(dir)
-                    .font(Typography.path)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer()
-            Text("+\(file.additions)").foregroundStyle(.green).font(.caption.monospacedDigit())
-            Text("−\(file.deletions)").foregroundStyle(.red).font(.caption.monospacedDigit())
-            Button {
-                onRefresh()
-            } label: {
-                if isRefreshing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise").foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(isRefreshing)
-            .help("Fetch new commits and reload comments (⌘R)")
-            .accessibilityLabel("Refresh pull request")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.bar)
-    }
-}
-
-/// IntelliJ-style PR landing page: title, meta, markdown description, and an
-/// AI explain action — shown while no file is selected.
+/// The page a pull request opens on: what it is, what state it is in, and the
+/// way into reading it.
 struct PROverviewView: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var session: ReviewSession
-    @AppStorage("showRightPanel") private var showRightPanel = false
-    @AppStorage("rightPanelTab") private var panelTab = 0
 
     var body: some View {
         let pr = session.data.pr
+        let viewed = model.files.count { session.data.viewedFiles.contains($0.path) }
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(pr.title)
-                    .font(.title2.bold())
-                    .textSelection(.enabled)
-                HStack(spacing: 10) {
-                    Text(verbatim: "#\(String(pr.number))")
-                        .font(.callout.monospacedDigit().bold())
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(.quaternary, in: Capsule())
-                    Label(pr.authorLogin, systemImage: "person")
-                    Label(pr.headRefName, systemImage: "arrow.triangle.branch")
-                        .font(.callout.monospaced())
-                    if let base = pr.baseRefName {
-                        Image(systemName: "arrow.right")
-                        Text(base).font(.callout.monospaced())
-                    }
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                HStack(spacing: 12) {
-                    Label("\(model.files.count) files", systemImage: "doc.on.doc")
-                    Text(verbatim: "+\(String(model.files.reduce(0) { $0 + $1.additions }))")
-                        .foregroundStyle(.green).monospacedDigit()
-                    Text(verbatim: "−\(String(model.files.reduce(0) { $0 + $1.deletions }))")
-                        .foregroundStyle(.red).monospacedDigit()
-                    CommentsButton(session: session)
-                    CommitsButton(session: session)
-                    FindingsButton(session: session)
-                    PendingReviewButton(session: session)
-                    VerdictChips()
-                    Spacer()
-                    if let note = model.worktreeNote {
-                        Label(note, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .lineLimit(2)
-                            .help(note)
-                    } else if let note = model.refreshNote {
-                        Text(note)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .transition(.opacity)
-                    }
-                    Button {
-                        Task { await model.refreshPR() }
-                    } label: {
-                        if model.isRefreshing {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("Refresh", systemImage: "arrow.clockwise")
+            VStack(alignment: .leading, spacing: Spacing.lg) {
+                VStack(alignment: .leading, spacing: Spacing.md) {
+                    Text(pr.title)
+                        .font(Typography.pageTitle)
+                        .foregroundStyle(Palette.textStrong)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: Spacing.sm) {
+                        stateTag(pr)
+                        Text(verbatim: "#\(pr.number)").foregroundStyle(Palette.textSecondary)
+                        AvatarDisc(login: pr.authorLogin, size: 18)
+                        Text(pr.authorLogin).foregroundStyle(Palette.text)
+                        Text("wants to merge").foregroundStyle(Palette.textTertiary)
+                        Text(pr.headRefName).font(Typography.identifier)
+                            .foregroundStyle(Palette.textSecondary)
+                            .lineLimit(1).truncationMode(.middle)
+                        if let base = pr.baseRefName {
+                            Image(systemName: "arrow.right").font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Palette.textTertiary)
+                            Text(base).font(Typography.identifier)
+                                .foregroundStyle(Palette.textSecondary)
                         }
                     }
-                    .disabled(model.isRefreshing)
-                    .help("Fetch new commits and reload comments (⌘R)")
-                    .accessibilityLabel("Refresh pull request")
+                    .font(Typography.body)
+                }
+
+                HStack(spacing: Spacing.md) {
+                    Button(viewed == 0 ? "Start review" : viewed == model.files.count
+                           ? "Open files" : "Continue review") { model.showFiles() }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(model.files.isEmpty)
+                        .help("Open the first file you have not viewed")
                     Button {
                         Task { await model.explainDiff() }
                     } label: {
                         // Says which it is: running the agent costs a couple of
                         // minutes, opening a cached walkthrough is instant, and
                         // one label for both hid that difference.
-                        Label(session.data.explanation == nil ? "Explain diff" : "Walkthrough",
+                        Label(session.data.explanation == nil ? "Explain this PR" : "Walkthrough",
                               systemImage: "sparkles")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(SecondaryButtonStyle())
                     .disabled(!session.agentState.canStart && session.data.explanation == nil)
                     .help(session.data.explanation == nil
-                          ? "Read the PR and explain it (\u{21E7}\u{2318}E)"
+                          ? "Have Claude read the PR and explain it (\u{21E7}\u{2318}E)"
                           : "Open the PR walkthrough (\u{21E7}\u{2318}E)")
+                    Button {
+                        Task { await model.refreshPR() }
+                    } label: {
+                        if model.isRefreshing {
+                            ProgressView().controlSize(.small).scaleEffect(0.8)
+                        } else {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .disabled(model.isRefreshing)
+                    .help("Fetch new commits and reload comments (\u{2318}R)")
+                    Spacer(minLength: 0)
+                    VerdictChips()
                 }
-                .font(.callout)
-                Divider()
-                if pr.body.isEmpty {
-                    Text("No description.")
-                        .foregroundStyle(.tertiary)
-                } else {
-                    MarkdownBodyView(text: pr.body)
+
+                facts(viewed: viewed)
+
+                VStack(alignment: .leading, spacing: Spacing.md) {
+                    if pr.body.isEmpty {
+                        Text("No description.").font(Typography.body)
+                            .foregroundStyle(Palette.textTertiary)
+                    } else {
+                        MarkdownBodyView(text: pr.body)
+                    }
                 }
+                .padding(Spacing.lg)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .card()
+                .contextMenu {
+                    Button("Copy Description") { AppModel.copy(pr.body) }
+                    if let url = model.pullRequestURL(number: pr.number) {
+                        Button("Open on GitHub") { NSWorkspace.shared.open(url) }
+                    }
+                }
+
                 // Work already done on this PR, surfaced where you land rather
                 // than left behind two keystrokes away. Nothing shows until
-                // there is something to show, so the page does not grow chrome
-                // for a PR you have not touched.
+                // there is something to show.
                 OverviewDigest(session: session)
-                Spacer(minLength: 0)
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Prose is unreadable edge to edge; cap the measure and centre it.
+            .frame(maxWidth: 860, alignment: .leading)
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.xl)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .background(Palette.canvas)
+    }
+
+    private func stateTag(_ pr: PullRequest) -> Tag {
+        if !pr.isOpen {
+            return Tag(pr.stateLabel.capitalized,
+                       tint: pr.stateLabel == "MERGED" ? .purple : Palette.removedText)
+        }
+        return pr.isDraft == true ? Tag("Draft", tint: Palette.textSecondary)
+                                  : Tag("Open", tint: Palette.addedText)
+    }
+
+    /// The numbers, as a row of small tiles that lead where they point.
+    private func facts(viewed: Int) -> some View {
+        let additions = model.files.reduce(0) { $0 + $1.additions }
+        let deletions = model.files.reduce(0) { $0 + $1.deletions }
+        let open = session.data.findings.filter { !$0.dismissed }
+        let hasHigh = open.contains { $0.severityRank == 0 }
+        let reviewed = session.data.reviewStamp != nil
+        let unresolved = model.unresolvedThreadCount
+        return HStack(spacing: Spacing.md) {
+            FactTile(label: "Files", value: "\(model.files.count)",
+                     detail: Text("+\(additions.formatted())").foregroundColor(Palette.addedText)
+                         + Text("  \u{2212}\(deletions.formatted())").foregroundColor(Palette.removedText)) {
+                model.showFiles()
+            }
+            FactTile(label: "Viewed", value: "\(viewed) of \(model.files.count)",
+                     detail: Text(viewed == model.files.count && viewed > 0
+                                  ? "all read" : "\(model.files.count - viewed) left")) {
+                model.showFiles()
+            }
+            FactTile(label: "Threads",
+                     value: model.isLoadingDetails ? "\u{2026}" : "\(model.threads.count)",
+                     detail: Text(unresolved > 0 ? "\(unresolved) open" : "none open")
+                         .foregroundColor(unresolved > 0 ? Palette.amber : Palette.textTertiary)) {
+                model.show(.threads)
+            }
+            FactTile(label: "Findings",
+                     value: reviewed ? "\(open.count)" : "\u{2013}",
+                     detail: Text(!reviewed ? "not reviewed" : open.isEmpty ? "clean"
+                                  : hasHigh ? "high severity" : "to triage")
+                         .foregroundColor(hasHigh ? Palette.removedText : Palette.textTertiary)) {
+                model.show(.findings)
+            }
+            FactTile(label: "Commits",
+                     value: model.isLoadingDetails ? "\u{2026}" : "\(model.commits.count)",
+                     detail: Text(model.commits.first.map { Dates.age(iso: $0.date) } ?? " ")) {
+                model.show(.commits)
+            }
+        }
+    }
+}
+
+private struct FactTile: View {
+    let label: String
+    let value: String
+    let detail: Text
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(label.uppercased()).font(Typography.eyebrow).kerning(0.6)
+                    .foregroundStyle(Palette.textTertiary)
+                Text(value).font(.system(size: 17, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Palette.textStrong)
+                detail.font(Typography.metaDigits).foregroundStyle(Palette.textTertiary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.sm + 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .card(border: hovering ? Palette.selectionBorder : Palette.cardBorder)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
 struct FileDiffContainer: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var session: ReviewSession
-    @State private var layout: DiffLayout = .sideBySide
+    @AppStorage(PrefKey.diffLayout) private var layout: DiffLayout = .sideBySide
     @State private var selection: LineSelection?
+    @State private var command: DiffCommand?
     @AppStorage(PrefKey.diffFontSize) private var fontSize = DiffMetrics.defaultFontSize
     var onAsk: (String, String) -> Void
 
     var body: some View {
-        switch session.pane {
-        case .commits:
-            if let commit = session.selectedCommit {
-                CommitDiffView(session: session, commit: commit, onAsk: onAsk)
-            } else {
-                PRCommitsView(session: session)
+        Group {
+            switch session.pane {
+            case .commits:
+                if let commit = session.selectedCommit {
+                    CommitDiffView(session: session, commit: commit, onAsk: onAsk)
+                } else {
+                    PRCommitsView(session: session)
+                }
+            case .comments:
+                PRCommentsView(session: session)
+            case .explain:
+                ExplainView(session: session, controller: model.agent)
+            case .review:
+                ReviewView(session: session, controller: model.agent)
+            case .pending:
+                PendingReviewView(session: session)
+            case .diff:
+                diffOrOverview
             }
-        case .comments:
-            PRCommentsView(session: session)
-        case .explain:
-            ExplainView(session: session, controller: model.agent)
-        case .review:
-            ReviewView(session: session, controller: model.agent)
-        case .pending:
-            PendingReviewView(session: session)
-        case .diff:
-            diffOrOverview
         }
+        .background(Palette.canvas)
     }
 
     @ViewBuilder private var diffOrOverview: some View {
         if let path = session.selectedFile,
            let file = model.files.first(where: { $0.path == path }) {
             VStack(spacing: 0) {
-                FileHeaderBar(file: file,
-                              isRefreshing: model.isRefreshing,
-                              onRefresh: { Task { await model.refreshPR() } },
-                              onClose: { session.selectedFile = nil })
+                FileHeaderBar(file: file, session: session, layout: $layout)
                 FileDiffView(file: file, layout: $layout, selection: $selection, fontSize: fontSize,
                          focusLine: session.selectedLines?.lowerBound,
                          comments: model.commentsByPath[file.path] ?? [],
                          findings: session.data.findings.filter { $0.file == file.path },
+                         command: $command,
                          onFocused: { session.selectedLines = nil },
                          onAsk: onAsk,
                          onReplyComment: { c, body in Task { await model.reply(to: c, body: body) } },
@@ -249,199 +346,22 @@ struct FileDiffContainer: View {
                              model.stageComment(path: file.path, startLine: start,
                                                 endLine: end, body: body)
                          },
+                         onDismissFinding: { model.setFindingDismissed($0, true) },
                          stagedCount: session.data.draftComments.count)
             }
                 .id(file.path) // reset scroll + selection per file
                 .onChange(of: file.path) { selection = nil }
                 .focusable()
                 .focusEffectDisabled()  // no blue focus ring around the diff
-                .onKeyPress("j") { step(1); return .handled }
-                .onKeyPress("k") { step(-1); return .handled }
-                .toolbar {
-                    Picker("Layout", selection: $layout) {
-                        ForEach(DiffLayout.allCases, id: \.self) { Text($0.rawValue) }
-                    }.pickerStyle(.segmented)
-                    Stepper("Font \(fontSize)pt", value: $fontSize,
-                            in: DiffMetrics.minFontSize...DiffMetrics.maxFontSize)
-                }
+                .onKeyPress("j") { model.stepFile(1); return .handled }
+                .onKeyPress("k") { model.stepFile(-1); return .handled }
+                .onKeyPress("v") { model.toggleViewedAndAdvance(); return .handled }
+                .onKeyPress("n") { command = DiffCommand(.nextChange); return .handled }
+                .onKeyPress("p") { command = DiffCommand(.previousChange); return .handled }
+                .onKeyPress("c") { command = DiffCommand(.comment); return .handled }
+                .onKeyPress("a") { command = DiffCommand(.ask); return .handled }
         } else {
             PROverviewView(session: session)
-        }
-    }
-
-    private func step(_ delta: Int) {
-        guard let current = session.selectedFile,
-              let idx = model.files.firstIndex(where: { $0.path == current }) else {
-            if delta > 0 { session.selectedFile = model.files.first?.path }
-            return
-        }
-        let next = idx + delta
-        if model.files.indices.contains(next) { session.selectedFile = model.files[next].path }
-    }
-}
-
-struct MainSplitView: View {
-    @EnvironmentObject var model: AppModel
-    @State private var pendingAsk: (text: String, chip: String)?
-    // Hidden by default: the diff is the workspace, the assistant is an
-    // inspector. Auto-opens when the user asks about a selection or when
-    // findings arrive (see AgentStatusView).
-    @AppStorage("showRightPanel") private var showRightPanel = false
-
-    @AppStorage("rightPanelTab") private var panelTab = 0
-
-    var body: some View {
-        NavigationSplitView {
-            SidebarView().navigationSplitViewColumnWidth(min: 220, ideal: 280)
-        } detail: {
-            // Diff pane must absorb extra width; NavigationSplitView's detail column
-            // is the only greedy one, so both panes live there split by HSplitView
-            // with the chat panel capped. The tool strip (IntelliJ-style) stays
-            // pinned at the window edge whether or not the panel is open.
-            HStack(spacing: 0) {
-                HSplitView {
-                    VStack(spacing: 0) {
-                        if let banner = model.errorBanner {
-                            Text(banner).foregroundStyle(Color.white).padding(Spacing.sm - 2)
-                                .frame(maxWidth: .infinity).background(.red)
-                        }
-                        CenterView { text, chip in
-                            pendingAsk = (text, chip)
-                            panelTab = 0
-                            showRightPanel = true
-                        }
-                        StatusBar()
-                    }
-                    .frame(minWidth: 480, maxWidth: .infinity)
-                    .layoutPriority(1)
-                    // Without a session the panel has nothing to show and its
-                    // collapsed content left a floating divider fragment.
-                    if showRightPanel, model.session != nil {
-                        RightPanel(pendingAsk: $pendingAsk, tab: $panelTab)
-                            .frame(minWidth: 280, idealWidth: 340, maxWidth: 480)
-                    }
-                }
-                Divider()
-                ToolStrip(showPanel: $showRightPanel, tab: $panelTab)
-            }
-            // ⌥⌘0 still toggles the panel; the visible toggle lives in the strip.
-            .background(
-                ZStack {
-                    Button("") { showRightPanel.toggle() }
-                        .keyboardShortcut("0", modifiers: [.option, .command])
-                }
-                .hidden()
-            )
-        }
-    }
-
-}
-
-/// IntelliJ-style vertical tool-window strip: one icon per assistant tab,
-/// always visible at the window's right edge. Clicking a tab opens the panel
-/// on it; clicking the active tab again collapses the panel.
-struct ToolStrip: View {
-    @EnvironmentObject var model: AppModel
-    @Binding var showPanel: Bool
-    @Binding var tab: Int
-    private let items: [(icon: String, label: String)] = [
-        ("bubble.left.and.text.bubble.right", "Claude"),
-        ("checklist", "Findings"),
-    ]
-
-    var body: some View {
-        // The assistant panel only exists with a PR open, so its tabs must
-        // read as unavailable until then — they used to look active and
-        // highlighted while clicking did nothing.
-        let enabled = model.session != nil
-        VStack(spacing: 10) {
-            ForEach(items.indices, id: \.self) { i in
-                let active = enabled && showPanel && tab == i
-                Button {
-                    if showPanel && tab == i {
-                        showPanel = false
-                    } else {
-                        tab = i
-                        showPanel = true
-                    }
-                } label: {
-                    Image(systemName: items[i].icon)
-                        .imageScale(.medium)
-                        .frame(width: 28, height: 28)
-                        .background(active ? Color.accentColor.opacity(0.25) : .clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                        .foregroundStyle(active ? Color.accentColor : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .disabled(!enabled)
-                .opacity(enabled ? 1 : 0.35)
-                .help(enabled ? items[i].label : "\(items[i].label) — open a pull request first")
-                .accessibilityLabel("\(items[i].label) panel")
-            }
-            Spacer()
-        }
-        .padding(.vertical, 10)
-        .frame(width: 36)
-        .background(.bar)
-    }
-}
-
-struct StatusBar: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        HStack {
-            if let s = model.session {
-                Text(verbatim: "#\(String(s.data.pr.number)) \(s.data.pr.title)").lineLimit(1)
-                Text(s.data.pr.headRefName).font(.caption.monospaced()).foregroundStyle(.secondary)
-            }
-            Spacer()
-            // AgentStatusView observes ReviewSession directly (project ruling #2) so it
-            // must be handed a concrete session rather than reading model.session? itself.
-            if let s = model.session {
-                AgentStatusView(session: s)
-            }
-        }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(.bar)
-    }
-}
-
-/// Opens the all-comments list from the PR overview, showing how many threads
-/// are waiting and how many of those are still unresolved.
-struct CommentsButton: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var session: ReviewSession
-
-    var body: some View {
-        // Comments arrive after the diff now, so a bare "0" while they are
-        // still in flight would be a wrong answer rather than a pending one.
-        if model.isLoadingDetails {
-            ProgressView().controlSize(.small)
-        } else {
-            let threads = model.threads
-            let unresolved = model.unresolvedThreadCount
-            Button {
-                model.closeCommit()
-                session.pane = .comments
-            } label: {
-                HStack(spacing: Spacing.xs) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                    Text(verbatim: "\(threads.count)")
-                        .monospacedDigit()
-                    if unresolved > 0 {
-                        Text(verbatim: "(\(unresolved) unresolved)")
-                            .foregroundStyle(Palette.warning)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(threads.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-            .disabled(threads.isEmpty)
-            .help(threads.isEmpty
-                  ? "No review comments on this pull request"
-                  : "Show all review comments (⇧⌘C)")
-            .accessibilityLabel("Show all review comments")
         }
     }
 }
@@ -470,7 +390,7 @@ struct OverviewDigest: View {
                          action: "Open", onOpen: { Task { await model.explainDiff() } }) {
                         Text(e.summary)
                             .font(Typography.body)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Palette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -489,7 +409,7 @@ struct OverviewDigest: View {
                                         SeverityChip(severity: finding.severity)
                                         Text(finding.explanation)
                                             .font(Typography.body)
-                                            .foregroundStyle(.secondary)
+                                            .foregroundStyle(Palette.textSecondary)
                                             .lineLimit(2)
                                             .multilineTextAlignment(.leading)
                                             .fixedSize(horizontal: false, vertical: true)
@@ -518,16 +438,16 @@ struct OverviewDigest: View {
                 Spacer()
                 Button(action, action: onOpen)
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
-                    .font(.callout)
+                    .foregroundStyle(Palette.accent)
+                    .font(Typography.body)
             }
             .font(Typography.sectionTitle)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Palette.textSecondary)
             content()
         }
         .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.18), in: RoundedRectangle(cornerRadius: Radius.lg))
+        .background(Palette.raised, in: RoundedRectangle(cornerRadius: Radius.lg))
         .overlay {
             RoundedRectangle(cornerRadius: Radius.lg)
                 .strokeBorder(Palette.cardBorder)
@@ -565,90 +485,5 @@ struct VerdictChips: View {
             .padding(.horizontal, Spacing.xs + 1)
             .padding(.vertical, 1)
             .background(tint.opacity(0.14), in: Capsule())
-    }
-}
-
-/// Opens the staged notes. Hidden until there are some — an empty pane is not
-/// worth a button on the overview.
-struct PendingReviewButton: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var session: ReviewSession
-
-    var body: some View {
-        let count = session.data.draftComments.count
-        if count > 0 {
-            Button {
-                model.closeCommit()
-                session.pane = .pending
-            } label: {
-                Label("\(count) staged", systemImage: "square.and.pencil")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(Color.accentColor)
-            }
-            .buttonStyle(.plain)
-            .help("Notes waiting to be submitted as one review (\u{21E7}\u{2318}Y)")
-        }
-    }
-}
-
-struct FindingsButton: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var session: ReviewSession
-
-    var body: some View {
-        let open = session.data.findings.filter { !$0.dismissed }
-        let reviewed = session.data.reviewStamp != nil
-        Button {
-            Task { await model.review() }
-        } label: {
-            HStack(spacing: Spacing.xs) {
-                Image(systemName: reviewed && open.isEmpty ? "checkmark.seal" : "checklist")
-                if reviewed {
-                    Text(verbatim: open.isEmpty ? "clean" : "\(open.count)")
-                        .monospacedDigit()
-                    if let worst = open.map(\.severityRank).min(), worst == 0 {
-                        Text("high").foregroundStyle(Palette.removed)
-                    }
-                } else {
-                    Text("Review")
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(reviewed && open.isEmpty
-                         ? AnyShapeStyle(Palette.added) : AnyShapeStyle(.secondary))
-        .disabled(!session.agentState.canStart && !reviewed)
-        .help(reviewed ? "Show review findings (\u{21E7}\u{2318}F)"
-                       : "Review this pull request (\u{21E7}\u{2318}F)")
-        .accessibilityLabel(reviewed ? "Show review findings" : "Review this pull request")
-    }
-}
-
-struct CommitsButton: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var session: ReviewSession
-
-    var body: some View {
-        if model.isLoadingDetails {
-            ProgressView().controlSize(.small)
-        } else {
-            Button {
-                // Land on the list, not on whichever commit was open last.
-                model.closeCommit()
-                session.pane = .commits
-            } label: {
-                HStack(spacing: Spacing.xs) {
-                    Image(systemName: "arrow.triangle.branch")
-                    Text(verbatim: "\(model.commits.count)").monospacedDigit()
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(model.commits.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
-            .disabled(model.commits.isEmpty)
-            .help(model.commits.isEmpty
-                  ? "No commits on this pull request"
-                  : "Show all commits (⇧⌘K)")
-            .accessibilityLabel("Show all commits")
-        }
     }
 }

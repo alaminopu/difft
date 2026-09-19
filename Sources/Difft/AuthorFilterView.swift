@@ -13,8 +13,8 @@ struct AuthorFilterButton: View {
                 Text(label)
                 Image(systemName: "chevron.down").imageScale(.small)
             }
-            .font(.callout)
-            .foregroundStyle(model.prAuthors.isEmpty ? Color.secondary : Color.accentColor)
+            .font(Typography.body)
+            .foregroundStyle(model.prAuthors.isEmpty ? Color.secondary : Palette.accent)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -95,7 +95,7 @@ struct AuthorPicker: View {
     private var header: some View {
         HStack(spacing: Spacing.xs) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary).imageScale(.small)
+                .foregroundStyle(Palette.textSecondary).imageScale(.small)
             TextField("Find a person", text: $filter)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
@@ -103,7 +103,7 @@ struct AuthorPicker: View {
                 ProgressView().controlSize(.small).scaleEffect(0.55).frame(width: 14, height: 14)
             } else if !filter.isEmpty {
                 Button { filter = "" } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .buttonStyle(.plain).foregroundStyle(Palette.textSecondary)
                     .accessibilityLabel("Clear")
             }
         }
@@ -114,7 +114,7 @@ struct AuthorPicker: View {
     private var loading: some View {
         HStack {
             Spacer()
-            Text("Loading people…").font(.callout).foregroundStyle(.secondary)
+            Text("Loading people…").font(Typography.body).foregroundStyle(Palette.textSecondary)
             Spacer()
         }
         .padding(.vertical, Spacing.xl)
@@ -142,7 +142,7 @@ struct AuthorPicker: View {
                 }
                 if rest.isEmpty, picked.isEmpty, literal == nil {
                     Text(model.knownAuthors.isEmpty ? "No people found" : "No match")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(Typography.body).foregroundStyle(Palette.textSecondary)
                         .padding(.horizontal, Spacing.md)
                         .padding(.vertical, Spacing.lg)
                 }
@@ -154,8 +154,8 @@ struct AuthorPicker: View {
     private var footer: some View {
         Button("Clear \(model.prAuthors.count) selected") { model.prAuthors = [] }
             .buttonStyle(.plain)
-            .font(.callout)
-            .foregroundStyle(Color.accentColor)
+            .font(Typography.body)
+            .foregroundStyle(Palette.accent)
             .padding(.horizontal, Spacing.md)
             .padding(.vertical, Spacing.sm)
     }
@@ -183,11 +183,11 @@ private struct AuthorRow: View {
         Button { toggle(login) } label: {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary.opacity(0.5))
+                    .foregroundStyle(selected ? Palette.accent : Color.secondary.opacity(0.5))
                 VStack(alignment: .leading, spacing: 0) {
                     Text(login).lineLimit(1)
                     if let note {
-                        Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(note).font(Typography.meta).foregroundStyle(Palette.textSecondary).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)

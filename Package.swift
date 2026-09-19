@@ -14,7 +14,10 @@ let package = Package(
     targets: [
         .target(name: "DifftCore"),
         .target(name: "DifftServices", dependencies: ["DifftCore"]),
-        .target(name: "DifftUI", dependencies: ["DifftCore", "DifftServices", "Highlightr"]),
+        .target(name: "DifftUI", dependencies: ["DifftCore", "DifftServices", "Highlightr"],
+                // The bundled code font. Found by walking the bundle, never
+                // through Bundle.module — see CodeFont.registerBundledFonts.
+                resources: [.copy("Resources/Fonts")]),
         .executableTarget(name: "Difft", dependencies: ["DifftCore", "DifftServices", "DifftUI"]),
         .testTarget(name: "DifftCoreTests", dependencies: ["DifftCore"]),
         .testTarget(name: "DifftServicesTests", dependencies: ["DifftServices"]),

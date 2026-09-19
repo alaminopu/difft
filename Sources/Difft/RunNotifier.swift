@@ -1,5 +1,6 @@
 import AppKit
 import UserNotifications
+import DifftUI
 
 /// Tells you a run finished when you are not looking at the app.
 ///
@@ -51,7 +52,8 @@ final class RunNotifier {
         unread += 1
         NSApp.dockTile.badgeLabel = String(unread)
 
-        guard bundled, authorization == .authorized else { return }
+        let wanted = UserDefaults.standard.object(forKey: PrefKey.notifyOnRunFinished) as? Bool ?? true
+        guard bundled, wanted, authorization == .authorized else { return }
         let content = UNMutableNotificationContent()
         content.title = "\(label) finished · #\(pr)"
         content.body = "\(outcome)\n\(title)"

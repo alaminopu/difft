@@ -14,7 +14,7 @@ struct CommitDiffView: View {
     let commit: Commit
     var onAsk: (String, String) -> Void
 
-    @State private var layout: DiffLayout = .sideBySide
+    @AppStorage(PrefKey.diffLayout) private var layout: DiffLayout = .sideBySide
     @State private var selection: LineSelection?
     @AppStorage(PrefKey.diffFontSize) private var fontSize = DiffMetrics.defaultFontSize
 
@@ -23,11 +23,10 @@ struct CommitDiffView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             if model.isLoadingCommit {
                 VStack(spacing: 8) {
                     ProgressView()
-                    Text("Loading \(commit.shortSHA)…").foregroundStyle(.secondary).font(.callout)
+                    Text("Loading \(commit.shortSHA)…").foregroundStyle(Palette.textSecondary).font(Typography.body)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.commitFiles.isEmpty {
@@ -45,66 +44,45 @@ struct CommitDiffView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                OverviewBackButton()
-                Divider().frame(height: 14)
-                // Two levels up from here, so both rungs are offered rather
-                // than making the overview a two-step trip.
-                Button {
-                    model.closeCommit()
-                } label: {
-                    Label("Commits", systemImage: "chevron.left").font(.callout)
+        PaneHeader {
+            Button { model.closeCommit() } label: {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
+                    Text("Commits")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-                .help("Back to the commits list")
-                .accessibilityLabel("Back to commits")
-                Divider().frame(height: 14)
-                Text(commit.subject)
-                    .font(.callout.bold())
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .textSelection(.enabled)
-                Spacer(minLength: 8)
-                Text(commit.shortSHA)
-                    .font(.caption.monospaced())
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
-                    .textSelection(.enabled)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(commit.sha, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc").imageScale(.small).foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Copy the full sha")
-                .accessibilityLabel("Copy commit sha")
             }
-            HStack(spacing: 8) {
-                if !commit.author.isEmpty { Label(commit.author, systemImage: "person") }
-                Text(age)
-                if !model.commitFiles.isEmpty {
-                    Text(verbatim: "\(model.commitFiles.count) file\(model.commitFiles.count == 1 ? "" : "s")")
+            .buttonStyle(QuietButtonStyle())
+            .help("Back to the commits list")
+            .accessibilityLabel("Back to commits")
+            Text(commit.subject)
+                .font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
+                .lineLimit(1).truncationMode(.tail)
+            Text(commit.shortSHA).font(Typography.identifier)
+                .foregroundStyle(Palette.textSecondary)
+            if !commit.author.isEmpty {
+                Text("\(commit.author) \u{00B7} \(age)").font(Typography.meta)
+                    .foregroundStyle(Palette.textTertiary).lineLimit(1)
+            }
+        } trailing: {
+            if !model.commitFiles.isEmpty {
+                HStack(spacing: 6) {
                     Text(verbatim: "+\(model.commitFiles.reduce(0) { $0 + $1.additions })")
-                        .foregroundStyle(.green).monospacedDigit()
-                    Text(verbatim: "−\(model.commitFiles.reduce(0) { $0 + $1.deletions })")
-                        .foregroundStyle(.red).monospacedDigit()
+                        .foregroundStyle(Palette.addedText)
+                    Text(verbatim: "\u{2212}\(model.commitFiles.reduce(0) { $0 + $1.deletions })")
+                        .foregroundStyle(Palette.removedText)
                 }
+                .font(.system(size: 12, design: .monospaced))
+                SegmentedControl(selection: $layout,
+                                 options: [(.sideBySide, "Split"), (.unified, "Unified")])
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .contextMenu { CommitMenu(commit: commit) }
     }
 
     private var content: some View {
         HStack(spacing: 0) {
             fileList
-            Divider()
+            Rectangle().fill(Palette.hairline).frame(width: 1)
             if let path = session.selectedCommitFile,
                let file = model.commitFiles.first(where: { $0.path == path }) {
                 FileDiffView(file: file, layout: $layout, selection: $selection,
@@ -120,13 +98,6 @@ struct CommitDiffView: View {
                 ContentUnavailableView("Pick a file", systemImage: "doc.text")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-        .toolbar {
-            Picker("Layout", selection: $layout) {
-                ForEach(DiffLayout.allCases, id: \.self) { Text($0.rawValue) }
-            }.pickerStyle(.segmented)
-            Stepper("Font \(fontSize)pt", value: $fontSize,
-                            in: DiffMetrics.minFontSize...DiffMetrics.maxFontSize)
         }
     }
 
@@ -145,32 +116,31 @@ struct CommitDiffView: View {
                                 Text(name)
                                     .font(Typography.fileName)
                                     .lineLimit(1).truncationMode(.middle)
-                                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                                    .foregroundStyle(isSelected ? Palette.textStrong : Palette.text)
                                 Spacer(minLength: 4)
-                                Text(verbatim: "+\(file.additions)")
-                                    .foregroundStyle(.green).font(.caption.monospacedDigit())
-                                Text(verbatim: "−\(file.deletions)")
-                                    .foregroundStyle(.red).font(.caption.monospacedDigit())
+                                ChangeBar(additions: file.additions, deletions: file.deletions,
+                                          scale: ChangeBar.scale(for: model.commitFiles))
                             }
                             if !dir.isEmpty {
                                 Text(dir)
                                     .font(Typography.path)
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(Palette.textTertiary)
                                     .lineLimit(1).truncationMode(.head)
                             }
                         }
-                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .padding(.horizontal, Spacing.sm + 2).padding(.vertical, 6)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(isSelected ? Color.accentColor.opacity(0.12) : .clear)
+                        .background(isSelected ? Palette.selection : .clear,
+                                    in: RoundedRectangle(cornerRadius: 7))
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("File \(file.path), \(file.additions) additions, \(file.deletions) deletions")
                 }
             }
-            .padding(.vertical, 4)
+            .padding(Spacing.sm)
         }
-        .frame(width: 240)
-        .background(.quaternary.opacity(0.15))
+        .frame(width: 260)
+        .background(Palette.chrome)
     }
 }

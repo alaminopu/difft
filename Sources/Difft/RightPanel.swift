@@ -2,38 +2,41 @@ import SwiftUI
 import DifftServices
 import DifftUI
 
+/// The side panel: what is left to deal with, and a place to ask about it.
 struct RightPanel: View {
     @EnvironmentObject var model: AppModel
     @Binding var pendingAsk: (text: String, chip: String)?
     @Binding var tab: Int
 
+    private var selection: Binding<PanelTab> {
+        Binding(get: { PanelTab(rawValue: tab) ?? .queue }, set: { tab = $0.rawValue })
+    }
+
     var body: some View {
         let controller = model.agent
         VStack(spacing: 0) {
-            Text(["Claude", "Findings"][min(max(tab, 0), 1)])
-                .font(.caption.smallCaps())
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.bar)
+            HStack(spacing: Spacing.sm) {
+                Text(selection.wrappedValue == .queue ? "Review queue" : "Ask Claude")
+                    .font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
+                Spacer(minLength: 0)
+                SegmentedControl(selection: selection,
+                                 options: [(.queue, "Queue"), (.ask, "Ask")])
+            }
+            .padding(.horizontal, Spacing.lg)
+            .frame(height: Chrome.paneHeader)
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+
             if let session = model.session {
-                switch tab {
-                case 0: ChatTab(session: session, controller: controller, pendingAsk: $pendingAsk)
-                default: FindingsTab(session: session, controller: controller)
+                switch selection.wrappedValue {
+                case .queue: QueueTab(session: session)
+                case .ask: ChatTab(session: session, controller: controller, pendingAsk: $pendingAsk)
                 }
             } else {
                 Spacer()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onChange(of: pendingAsk?.chip) { if pendingAsk != nil { tab = 0 } }
-        .onAppear {
-            // The tab index is persisted, and there used to be a third tab.
-            // A session restored onto the removed index would show Findings
-            // while no tool-strip icon looked selected.
-            if tab > 1 { tab = 1 }
-        }
+        .onChange(of: pendingAsk?.chip) { if pendingAsk != nil { tab = PanelTab.ask.rawValue } }
         .onReceive(NotificationCenter.default.publisher(for: .difftCancelAgent)) { _ in model.agent.cancel() }
     }
 }
@@ -59,19 +62,29 @@ struct ChatTab: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 8) {
+            LazyVStack(alignment: .leading, spacing: Spacing.md) {
+                if session.data.chat.isEmpty {
+                    Text("Ask about this pull request, or select lines in the diff and "
+                         + "choose Ask Claude. It reads the code in the PR\u{2019}s worktree and "
+                         + "cannot change it.")
+                        .font(Typography.control).foregroundStyle(Palette.textTertiary)
+                        .lineSpacing(Typography.bodyLineSpacing)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(Array(session.data.chat.enumerated()), id: \.offset) { _, msg in
-                    VStack(alignment: .leading, spacing: 2) {
-                        if let chip = msg.contextChip {
-                            Text(chip).font(.caption.monospaced())
-                                .padding(3).background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                        }
+                    let mine = msg.role == "user"
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        if let chip = msg.contextChip { ContextChip(text: chip) }
                         MarkdownBodyView(text: msg.text)
-                            .padding(8)
-                            .background(msg.role == "user" ? Palette.activeChip : Palette.surface,
-                                        in: RoundedRectangle(cornerRadius: 8))
+                            .padding(.horizontal, mine ? Spacing.md : 0)
+                            .padding(.vertical, mine ? Spacing.sm : 0)
+                            .background(mine ? Palette.activeChip : .clear,
+                                        in: RoundedRectangle(cornerRadius: Radius.lg))
                     }
-                    .frame(maxWidth: .infinity, alignment: msg.role == "user" ? .trailing : .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contextMenu {
+                        Button("Copy") { AppModel.copy(msg.text) }
+                    }
                 }
                 // Only for runs that end up in this transcript. Reviewing and
                 // Explaining answer into their own panes, and their narration
@@ -79,22 +92,50 @@ struct ChatTab: View {
                 if case .running = session.agentState,
                    ChatTab.streamsHere(controller.lastRunLabel),
                    !controller.streamingText.isEmpty {
-                    Text(controller.streamingText).padding(8).foregroundStyle(.secondary)
+                    Text(controller.streamingText)
+                        .font(Typography.body).foregroundStyle(Palette.textSecondary)
+                        .lineSpacing(Typography.bodyLineSpacing)
                 }
-            }.padding(8)
+            }
+            .padding(Spacing.lg)
         }
         AgentRunBar(session: session)
-        if let chip = pendingAsk?.chip {
-            HStack {
-                Text(chip).font(.caption.monospaced())
-                Button("✕") { pendingAsk = nil }.buttonStyle(.plain)
-            }.padding(.horizontal, 8)
-        }
-        HStack {
-            TextField("Ask about this PR…", text: $question).onSubmit { submit() }
-            Button("Ask") { submit() }
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            if let chip = pendingAsk?.chip {
+                HStack(spacing: Spacing.xs) {
+                    ContextChip(text: chip)
+                    Button { pendingAsk = nil } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(Palette.textTertiary)
+                    .accessibilityLabel("Remove the selection")
+                }
+            }
+            HStack(spacing: Spacing.sm) {
+                TextField("Ask about this PR\u{2026}", text: $question, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(Typography.body)
+                    .lineLimit(1...5)
+                    .onSubmit { submit() }
+                Button { submit() } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Palette.onAccent)
+                        .frame(width: 22, height: 22)
+                        .background(Palette.accent, in: Circle())
+                }
+                .buttonStyle(.plain)
                 .disabled(question.isEmpty || !session.agentState.canStart)
-        }.padding(8)
+                .opacity(question.isEmpty || !session.agentState.canStart ? 0.35 : 1)
+                .accessibilityLabel("Ask")
+            }
+            .padding(.leading, Spacing.md).padding(.trailing, Spacing.xs + 1)
+            .padding(.vertical, Spacing.xs + 1)
+            .background(Palette.canvas, in: RoundedRectangle(cornerRadius: Radius.lg))
+            .overlay { RoundedRectangle(cornerRadius: Radius.lg).strokeBorder(Palette.cardBorder) }
+        }
+        .padding(Spacing.md)
+        .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
     }
 
     private func submit() {
@@ -108,69 +149,16 @@ struct ChatTab: View {
     }
 }
 
-/// Compact companion to the Review pane, not a second copy of it.
-///
-/// The findings list moved to its own centre pane — it needs width to group by
-/// file, filter by severity and show each finding's failure scenario. What is
-/// useful in a 300pt column is the score and a way through to the pane.
-struct FindingsTab: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var session: ReviewSession
-    @ObservedObject var controller: AgentController
-
-    private var findings: [Finding] { session.data.findings.filter { !$0.dismissed } }
-    private var isRunning: Bool {
-        if case .running(let label) = session.agentState {
-            return label == "Reviewing" || label == "Verifying"
-        }
-        return false
-    }
+/// The lines a question is about: "form/main.py:105-106".
+struct ContextChip: View {
+    let text: String
 
     var body: some View {
-        VStack(spacing: Spacing.md) {
-            if isRunning {
-                // Said "No review yet" all the way through a run, which read
-                // as the click having done nothing.
-                HStack(spacing: Spacing.xs) {
-                    ProgressView().controlSize(.small)
-                    Text(controller.lastRunLabel == "Verifying" ? "Verifying…" : "Reviewing…")
-                        .font(Typography.meta).foregroundStyle(.secondary)
-                }
-            } else if session.data.reviewStamp == nil {
-                Text("No review yet.")
-                    .font(Typography.meta).foregroundStyle(.secondary)
-            } else if findings.isEmpty {
-                Label("No defects found", systemImage: "checkmark.seal")
-                    .font(Typography.body).foregroundStyle(Palette.added)
-            } else {
-                VStack(spacing: Spacing.xs) {
-                    ForEach(["high", "medium", "low"], id: \.self) { severity in
-                        let n = findings.count { $0.severity.lowercased() == severity }
-                        if n > 0 {
-                            HStack(spacing: Spacing.xs) {
-                                SeverityChip(severity: severity)
-                                Text("\(n)").font(Typography.metaDigits)
-                                Spacer(minLength: 0)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: 160)
-            }
-            Button {
-                Task { await model.review() }
-            } label: {
-                Label(session.data.reviewStamp == nil ? "Run Claude review" : "Open review",
-                      systemImage: "checklist")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(isRunning || (!session.agentState.canStart && session.data.reviewStamp == nil))
-            .help("Findings open in their own pane (\u{21E7}\u{2318}F)")
-            Spacer()
-            AgentRunBar(session: session)
-        }
-        .padding(.top, Spacing.md)
-        .frame(maxWidth: .infinity)
+        Text(text)
+            .font(Typography.identifier)
+            .foregroundStyle(Palette.textSecondary)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 5))
     }
 }
 
@@ -181,27 +169,20 @@ struct AgentRunBar: View {
 
     var body: some View {
         if case .running(let label) = session.agentState {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(label).font(.caption).foregroundStyle(.secondary)
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .controlSize(.small)
-                }
-                Button {
+            HStack(spacing: Spacing.sm) {
+                ProgressView().controlSize(.small).scaleEffect(0.8)
+                Text("\(label)\u{2026}").font(Typography.control)
+                    .foregroundStyle(Palette.textSecondary)
+                Spacer(minLength: 0)
+                Button("Stop") {
                     NotificationCenter.default.post(name: .difftCancelAgent, object: nil)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .imageScale(.large)
-                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help("Cancel")
+                .buttonStyle(QuietButtonStyle())
                 .accessibilityLabel("Cancel agent run")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.bar)
+            .padding(.horizontal, Spacing.lg)
+            .frame(height: 34)
+            .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
         }
     }
 }
@@ -210,7 +191,8 @@ struct AgentStatusView: View {
     @ObservedObject var session: ReviewSession
     // Lives in the always-mounted status bar, so it is the reliable place to
     // pop the (default-hidden) assistant panel open when results land.
-    @AppStorage("showRightPanel") private var showRightPanel = false
+    @AppStorage(ShellPref.showPanel) private var showRightPanel = true
+    @AppStorage(ShellPref.panelTab) private var panelTab = PanelTab.queue.rawValue
     /// The PR whose findings this view is tracking, so a count that changed
     /// because the session changed is not read as a run finishing.
     @State private var openFor: Int?
@@ -223,7 +205,8 @@ struct AgentStatusView: View {
                 // duplicating it here read as two competing indicators.
                 EmptyView()
             case .failed(let msg):
-                Text(msg).foregroundStyle(.red).lineLimit(1).help(msg)
+                Label(msg, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(Palette.removedText).lineLimit(1).help(msg)
             default: EmptyView()
             }
         }
@@ -233,6 +216,8 @@ struct AgentStatusView: View {
         // had findings saved forced the panel open as if a review had landed.
         .onChange(of: session.data.findings.count) { old, new in
             guard new > old, session.data.pr.number == openFor else { return }
+            // New findings are new queue items, so that is the face to show.
+            panelTab = PanelTab.queue.rawValue
             showRightPanel = true
         }
         .onAppear { openFor = session.data.pr.number }

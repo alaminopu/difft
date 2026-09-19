@@ -42,14 +42,23 @@ struct DifftApp: App {
                 .environmentObject(highlighter)
                 .task { await model.checkTools() }
                 .task { await model.loadCurrentUser() }
+                #if DEBUG
+                .task { await DebugLaunch.run(model) }
+                #endif
                 .onAppear { RunNotifier.shared.start() }
                 .frame(minWidth: 1100, minHeight: 700)
                 .preferredColorScheme(appearance.colorScheme)
+                .tint(Palette.accent)
         }
+        // The tab bar is the titlebar; see WindowConfigurator.
+        .windowStyle(.hiddenTitleBar)
         .commands { DifftCommands(model: model) }
 
         Settings {
             SettingsView()
+                // The preview draws a real diff, which needs the highlighter.
+                .environmentObject(highlighter)
+                .preferredColorScheme(appearance.colorScheme)
         }
     }
 }
@@ -71,6 +80,33 @@ struct DifftCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
+            Button("Show or Hide File List") {
+                NotificationCenter.default.post(name: .difftToggleSidebar, object: nil)
+            }
+            .keyboardShortcut("s", modifiers: [.command, .control])
+
+            Button("Show or Hide Review Queue") {
+                NotificationCenter.default.post(name: .difftTogglePanel, object: nil)
+            }
+            .keyboardShortcut("0", modifiers: [.command, .option])
+            .disabled(model.session == nil)
+
+            Divider()
+
+            Button("Jump to File or Line\u{2026}") {
+                NotificationCenter.default.post(name: .difftJump, object: nil)
+            }
+            .keyboardShortcut("k", modifiers: .command)
+            .disabled(model.session == nil)
+
+            // The tabs, in bar order. Navigation only: unlike the commands
+            // below, these never start an agent run.
+            ForEach(ReviewTab.allCases) { tab in
+                Button(tab.label) { model.show(tab) }
+                    .keyboardShortcut(KeyEquivalent(tab.shortcut), modifiers: .command)
+                    .disabled(model.session == nil)
+            }
+
             Divider()
             Button("All Review Comments") {
                 model.session?.pane = .comments
@@ -129,6 +165,9 @@ struct RootView: View {
     @AppStorage(PrefKey.codeFontFamily) private var codeFontFamily = CodeFont.systemFamily
     @AppStorage(PrefKey.diffFontSize) private var diffFontSize = DiffMetrics.defaultFontSize
     @AppStorage(PrefKey.syntaxTheme) private var syntaxTheme = SyntaxTheme.atomOne
+    #if DEBUG
+    @Environment(\.openSettings) private var openSettings
+    #endif
 
     /// Resolved from the preference rather than read from the environment, so
     /// the syntax palette cannot lag a scheme the user forced.
@@ -166,6 +205,11 @@ struct RootView: View {
             return DifftURLPolicy.allowsOpening(url) ? .systemAction : .discarded
         })
         .onAppear { syncHighlighter() }
+        #if DEBUG
+        .task {
+            if ProcessInfo.processInfo.environment["DIFFT_SETTINGS"] != nil { openSettings() }
+        }
+        #endif
         .onChange(of: colorScheme) { _, _ in highlighter.setDark(isDark) }
         .onChange(of: appearance) { _, _ in highlighter.setDark(isDark) }
         // The font has to be pushed into the highlighter, not applied around
@@ -186,3 +230,41 @@ struct RootView: View {
         highlighter.setCodeFont(family: codeFontFamily, size: CGFloat(diffFontSize))
     }
 }
+
+#if DEBUG
+/// Drives a debug build straight to a screen, for checking a design change
+/// without clicking through to it:
+///
+///     DIFFT_OPEN_PR=6022 DIFFT_OPEN_PATH=form/main.py DIFFT_OPEN_LINE=120 swift run Difft
+///
+/// Compiled out of release builds.
+enum DebugLaunch {
+    @MainActor static func run(_ model: AppModel) async {
+        let env = ProcessInfo.processInfo.environment
+        if env["DIFFT_HOME"] != nil { model.closeRepository(); return }
+        guard let number = env["DIFFT_OPEN_PR"].flatMap(Int.init) else { return }
+        // The list page loads the same query; wait for whichever lands.
+        for _ in 0..<60 where model.prs.isEmpty {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        guard let pr = model.prs.first(where: { $0.number == number }) else { return }
+        await model.openPR(pr)
+        if let index = env["DIFFT_OPEN_FILE"].flatMap(Int.init), model.files.indices.contains(index) {
+            model.open(file: model.files[index].path)
+        }
+        if let suffix = env["DIFFT_OPEN_PATH"],
+           let file = model.files.first(where: { $0.path.hasSuffix(suffix) }) {
+            // Threads load after the diff; wait so the line can be focused.
+            for _ in 0..<40 where model.isLoadingDetails {
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            model.open(file: file.path, line: env["DIFFT_OPEN_LINE"].flatMap(Int.init))
+        }
+        if let tab = env["DIFFT_TAB"].flatMap(ReviewTab.init(rawValue:)) { model.show(tab) }
+        if env["DIFFT_PANE"] == "pending" { model.session?.pane = .pending }
+        if env["DIFFT_JUMP"] != nil {
+            NotificationCenter.default.post(name: .difftJump, object: nil)
+        }
+    }
+}
+#endif

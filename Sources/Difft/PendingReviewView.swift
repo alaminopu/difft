@@ -21,12 +21,10 @@ struct PendingReviewView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
-            if drafts.isEmpty && session.data.draftReviewBody.isEmpty {
-                empty
-            } else {
-                content
-            }
+            // Always the form. With no notes this used to show only an empty
+            // state, so a clean PR could not be approved from here at all —
+            // and approving without comment is the commonest review there is.
+            content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { summary = session.data.draftReviewBody }
@@ -39,39 +37,41 @@ struct PendingReviewView: View {
     }
 
     private var header: some View {
-        HStack(spacing: Spacing.sm) {
-            OverviewBackButton()
-            Divider().frame(height: 14)
-            Image(systemName: "checkmark.seal").foregroundStyle(Color.accentColor).imageScale(.small)
-            Text("Your review").font(Typography.sectionTitle)
+        PaneHeader {
+            Text("Your review").font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
             if !drafts.isEmpty {
-                Text("\(drafts.count) note\(drafts.count == 1 ? "" : "s")")
-                    .font(.callout).foregroundStyle(.secondary)
+                Text("\(drafts.count) note\(drafts.count == 1 ? "" : "s") staged")
+                    .font(Typography.meta).foregroundStyle(Palette.textTertiary)
             }
-            Spacer()
-            if model.isSubmittingReview { ProgressView().controlSize(.small) }
+        } trailing: {
+            if model.isSubmittingReview { ProgressView().controlSize(.small).scaleEffect(0.8) }
         }
-        .padding(.horizontal, Spacing.md)
-        .padding(.vertical, Spacing.sm)
-        .background(.bar)
     }
 
     private var empty: some View {
-        ContentUnavailableView(
-            "No notes yet", systemImage: "square.and.pencil",
-            description: Text("Select lines in a file, right-click, and choose "
-                              + "\"Comment on selection\" to start a review. "
-                              + "Notes gather here until you submit them together."))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        HStack(alignment: .top, spacing: Spacing.sm) {
+            Image(systemName: "square.and.pencil").foregroundStyle(Palette.textTertiary)
+            Text("No line notes yet. Select lines in a file and press C, or right-click and "
+                 + "choose Comment on Selection. They gather here until you submit. "
+                 + "You can also submit a verdict on its own.")
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Typography.control)
+        .foregroundStyle(Palette.textSecondary)
+        .lineSpacing(Typography.bodyLineSpacing)
+        .padding(Spacing.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.lg))
     }
 
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Spacing.md) {
+                if drafts.isEmpty { empty }
                 ForEach(byFile, id: \.path) { group in
                     VStack(alignment: .leading, spacing: Spacing.xs) {
                         Text(group.path)
-                            .font(Typography.path).foregroundStyle(.secondary)
+                            .font(Typography.path).foregroundStyle(Palette.textSecondary)
                             .lineLimit(1).truncationMode(.head)
                         ForEach(group.drafts) { draft in
                             DraftCard(draft: draft,
@@ -82,8 +82,9 @@ struct PendingReviewView: View {
                 }
                 submitBox
             }
-            .padding(Spacing.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 780, alignment: .leading)
+            .padding(Spacing.xl)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -101,31 +102,24 @@ struct PendingReviewView: View {
     private var submitBox: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             Text("Summary").font(Typography.sectionTitle)
-            TextEditor(text: $summary)
-                .font(Typography.body)
-                .frame(minHeight: 80)
-                .overlay { RoundedRectangle(cornerRadius: Radius.sm).strokeBorder(Palette.cardBorder) }
+            ComposerEditor(text: $summary, minHeight: 90)
                 .onChange(of: summary) { _, new in model.setDraftReviewBody(new) }
 
-            Picker("Verdict", selection: $verdict) {
-                ForEach(ReviewVerdict.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            SegmentedControl(selection: $verdict,
+                             options: ReviewVerdict.allCases.map { ($0, $0.label) })
 
             HStack(alignment: .firstTextBaseline) {
-                Text(verdict.detail).font(Typography.meta).foregroundStyle(.secondary)
+                Text(verdict.detail).font(Typography.meta).foregroundStyle(Palette.textSecondary)
                 Spacer()
                 Button("Submit review") {
                     Task { await model.submitReview(verdict) }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(PrimaryButtonStyle())
                 .disabled(model.isSubmittingReview)
             }
         }
-        .padding(Spacing.md)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.md))
-        .overlay { RoundedRectangle(cornerRadius: Radius.md).strokeBorder(Palette.cardBorder) }
+        .padding(Spacing.lg)
+        .card()
     }
 }
 
@@ -142,19 +136,23 @@ private struct DraftCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             HStack(spacing: Spacing.sm) {
-                Text(anchor).font(Typography.badge).foregroundStyle(.secondary)
+                Text(anchor).font(Typography.badge).foregroundStyle(Palette.textSecondary)
                 Spacer()
-                Button("Edit", action: onEdit).buttonStyle(.plain)
-                    .font(.caption).foregroundStyle(Color.accentColor)
-                Button("Remove", action: onRemove).buttonStyle(.plain)
-                    .font(.caption).foregroundStyle(.red)
+                Button("Edit", action: onEdit).buttonStyle(QuietButtonStyle())
+                Button("Remove", action: onRemove)
+                    .buttonStyle(QuietButtonStyle(tint: Palette.removedText))
             }
             MarkdownBodyView(text: draft.body)
         }
-        .padding(Spacing.sm)
+        .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
-        .overlay { RoundedRectangle(cornerRadius: Radius.sm).strokeBorder(Palette.cardBorder) }
+        .card()
+        .contextMenu {
+            Button("Edit", action: onEdit)
+            Button("Copy") { AppModel.copy(draft.body) }
+            Divider()
+            Button("Remove", role: .destructive, action: onRemove)
+        }
     }
 }
 
@@ -167,16 +165,14 @@ private struct DraftEditSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.sm) {
             Text("Edit note").font(Typography.sectionTitle)
-            TextEditor(text: $text)
-                .font(Typography.body)
-                .frame(minHeight: 140)
-                .overlay { RoundedRectangle(cornerRadius: Radius.sm).strokeBorder(Palette.cardBorder) }
+            ComposerEditor(text: $text, minHeight: 140)
             HStack {
                 Spacer()
-                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Cancel", action: onCancel).buttonStyle(SecondaryButtonStyle())
+                    .keyboardShortcut(.cancelAction)
                 Button("Save") { onSave(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     .keyboardShortcut(.return, modifiers: .command)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(PrimaryButtonStyle())
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }

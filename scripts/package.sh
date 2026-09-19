@@ -24,6 +24,9 @@ cp .build/release/Difft "$APP/Contents/MacOS/Difft"
 # own Bundle.module cannot, and macOS will not sign a bundle with anything
 # loose at its root. See Vendor/Highlightr/PATCH.md.
 cp -R .build/release/Highlightr_Highlightr.bundle "$APP/Contents/Resources/"
+# The bundled code font (JetBrains Mono NL). CodeFont walks Contents/Resources
+# for it, for the same reason Highlightr does.
+cp -R .build/release/Difft_DifftUI.bundle "$APP/Contents/Resources/"
 
 # App icon: rendered by scripts/make-icon.swift, packed into an .icns.
 ICONSET="$OUT/Difft.iconset"

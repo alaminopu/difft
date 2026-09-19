@@ -72,7 +72,7 @@ struct HalfLineView: View {
                                               digits: metrics.digits)
             Text(text)
                 .font(numberFont)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(numberColor)
                 .lineLimit(1)
                 .frame(width: metrics.gutterWidth, alignment: .trailing)
                 .padding(.trailing, metrics.gutterTrailing)
@@ -81,7 +81,7 @@ struct HalfLineView: View {
         } else {
             Text(line.flatMap { $0.gutterNumber(for: side) }.map(String.init) ?? "")
                 .font(numberFont)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(numberColor)
                 .lineLimit(1)
                 .frame(width: metrics.gutterWidth, alignment: .trailing)
                 .padding(.trailing, metrics.gutterTrailing)
@@ -103,6 +103,16 @@ struct HalfLineView: View {
         return pad(old) + " " + pad(new)
     }
 
+    /// Line numbers are there to be found, not read: faint on context, and
+    /// the change's own hue where the line changed.
+    private var numberColor: Color {
+        switch line?.kind {
+        case .addition: Palette.addedText
+        case .deletion: Palette.removedText
+        default: Palette.lineNumber
+        }
+    }
+
     private var attributed: AttributedString {
         guard let line else { return AttributedString("") }
         var attr = highlighter.highlighted(line.text, language: language)
@@ -120,7 +130,7 @@ struct HalfLineView: View {
                 // the emphasis wash, so emphasised spans read at full
                 // contrast. Dropping this in favour of weight alone made
                 // commented-out code unreadable where it was emphasised.
-                attr[lo..<hi].foregroundColor = Color.primary
+                attr[lo..<hi].foregroundColor = Palette.textStrong
                 attr[lo..<hi].font = highlighter.emphasisFont
             }
         }
@@ -158,6 +168,7 @@ struct DiffRowView: View {
     var onContextAsk: ((Int) -> Void)? = nil
     var onContextCopy: ((Int) -> Void)? = nil
     var onContextComment: ((Int) -> Void)? = nil
+    var onContextCopyReference: ((Int) -> Void)? = nil
 
     var body: some View {
         let ranges = intralineRanges
@@ -165,9 +176,11 @@ struct DiffRowView: View {
             switch layout {
             case .sideBySide:
                 HStack(alignment: .top, spacing: 0) {
+                    // Numbers lead on both sides. Meeting at the divider looked
+                    // tidy and read badly: the old side's code ended in a
+                    // ragged edge against a column of digits.
                     HalfLineView(line: row.left, side: .left, language: language, intraline: ranges.old,
-                                 metrics: metrics, codeWidth: leftCodeWidth,
-                                 numbersTrailing: true, onGutterTap: select)
+                                 metrics: metrics, codeWidth: leftCodeWidth, onGutterTap: select)
                     Rectangle()
                         .fill(Palette.hairline)
                         .frame(width: metrics.dividerWidth)
@@ -207,19 +220,27 @@ struct DiffRowView: View {
                 Button {
                     onContextComment?(row.id)
                 } label: {
-                    Label("Comment on selection", systemImage: "bubble.left.and.text.bubble.right")
+                    Label("Comment on Selection\u{2026}", systemImage: "bubble.left")
                 }
                 Divider()
             }
             Button {
                 onContextAsk?(row.id)
             } label: {
-                Label("Ask Claude", systemImage: "sparkles")
+                Label("Ask Claude About Selection", systemImage: "sparkles")
             }
+            Divider()
             Button {
                 onContextCopy?(row.id)
             } label: {
-                Label("Copy", systemImage: "doc.on.doc")
+                Label("Copy Code", systemImage: "doc.on.doc")
+            }
+            if onContextCopyReference != nil {
+                Button {
+                    onContextCopyReference?(row.id)
+                } label: {
+                    Label("Copy Line Reference", systemImage: "number")
+                }
             }
         }
     }
@@ -241,16 +262,19 @@ struct HunkHeaderView: View {
     var body: some View {
         Text(text)
             .font(.system(size: metrics.numberFontSize, design: .monospaced))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Palette.textTertiary)
             .lineLimit(1)
-            .padding(.leading, Spacing.md)
+            .padding(.leading, metrics.totalGutter + metrics.codeInset)
             // Grows with the type rather than clipping it at the largest sizes.
-            .frame(maxWidth: .infinity, minHeight: metrics.fontSize * 1.7, alignment: .leading)
-            .background(Palette.surface)
+            .frame(maxWidth: .infinity, minHeight: metrics.fontSize * 2, alignment: .leading)
+            .background(Palette.band)
+            .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
     }
 }
 
 public enum DiffLayout: String, CaseIterable, Sendable {
+    // Raw values are what `@AppStorage` persists; leave them alone.
     case sideBySide = "Side by side"
     case unified = "Unified"
 }

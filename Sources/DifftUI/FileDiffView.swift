@@ -18,16 +18,24 @@ public struct FileDiffView: View {
     /// defect belongs on the code, not in a list you cross-reference by hand.
     public let findings: [Finding]
     public var onAsk: (String, String) -> Void  // (selectedText, contextChip)
+    /// A keyboard command from the owner, consumed and cleared here.
+    @Binding var command: DiffCommand?
+    /// The change block `N`/`P` last landed on.
+    @State private var changeCursor: Int?
 
     // Old/new column balance, draggable via the center divider. Persisted
     // globally (not per file) so it survives file switches and relaunches.
     @AppStorage("diffSplitFraction") private var split = 0.5
+    @AppStorage(PrefKey.diffDensity) private var density = DiffDensity.comfortable
 
     fileprivate struct DiffItem: Identifiable, Sendable {
         enum Kind: Sendable {
             case hunkHeader(index: Int, text: String)
             case row(SideBySideRow)
-            case comment(ReviewComment)
+            /// A whole conversation as one card: root and replies used to be
+            /// separate items, which drew a reply as a second, indented box
+            /// with its own Reply button.
+            case thread(CommentThread)
             case finding(Finding)
             /// Stands in for a run of unchanged rows until the reader asks for
             /// them. `region` indexes `Built.hidden`.
@@ -106,17 +114,23 @@ public struct FileDiffView: View {
     public var onStageComment: ((Int, Int, String) -> Void)?
     /// Notes already staged, so the composer can say what this one joins.
     public var stagedCount: Int = 0
+    /// nil where findings cannot be triaged, which hides the action.
+    public var onDismissFinding: ((Finding) -> Void)?
 
     public init(file: FileDiff, layout: Binding<DiffLayout>, selection: Binding<LineSelection?>,
                 fontSize: Int = DiffMetrics.defaultFontSize, focusLine: Int? = nil,
                 comments: [ReviewComment] = [], findings: [Finding] = [],
+                command: Binding<DiffCommand?> = .constant(nil),
                 onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
                 onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
                 onResolveComment: @escaping (ReviewComment) -> Void = { _ in },
                 onEditComment: ((ReviewComment) -> ((String) -> Void)?)? = nil,
                 onAddComment: ((Int, Int, String) -> Void)? = nil,
                 onStageComment: ((Int, Int, String) -> Void)? = nil,
+                onDismissFinding: ((Finding) -> Void)? = nil,
                 stagedCount: Int = 0) {
+        self._command = command
+        self.onDismissFinding = onDismissFinding
         self.onReplyComment = onReplyComment
         self.onResolveComment = onResolveComment
         self.onEditComment = onEditComment
@@ -144,7 +158,9 @@ public struct FileDiffView: View {
         func next() -> Int { defer { uid += 1 }; return uid }
 
         for (i, hunk) in file.hunks.enumerated() {
-            if !fullFile { items.append(DiffItem(id: next(), kind: .hunkHeader(index: i, text: hunk.header))) }
+            if !fullFile, !hunk.header.isEmpty {
+                items.append(DiffItem(id: next(), kind: .hunkHeader(index: i, text: hunk.header)))
+            }
             let local = sideBySide ? RowPairer.rows(for: [hunk]) : RowPairer.unifiedRows(for: [hunk])
             for r in local {
                 // `counterpart` has to survive the id remap: without it
@@ -187,11 +203,11 @@ public struct FileDiffView: View {
         }
         // LEFT comments match old line numbers, RIGHT (the default) match new
         // ones. Outdated comments with no line are skipped.
-        for c in comments {
-            guard let line = c.line else { continue }
-            guard let rowID = (c.side == "LEFT" ? rowByOldLine[line] : rowByNewLine[line])
+        for thread in CommentThread.group(comments) {
+            guard let line = thread.root.line else { continue }
+            guard let rowID = (thread.root.side == "LEFT" ? rowByOldLine[line] : rowByNewLine[line])
             else { continue }
-            attachments[rowID, default: []].append(DiffItem(id: next(), kind: .comment(c)))
+            attachments[rowID, default: []].append(DiffItem(id: next(), kind: .thread(thread)))
         }
         if !attachments.isEmpty {
             var merged: [DiffItem] = []
@@ -247,7 +263,8 @@ public struct FileDiffView: View {
                 hasDel = hasDel || k == .deletion || rows[i].left?.kind == .deletion
                 i += 1
             }
-            let color: Color = (hasAdd && hasDel) ? .orange : hasDel ? .red : .green
+            let color: Color = (hasAdd && hasDel) ? Palette.mixed
+                : hasDel ? Palette.removed : Palette.added
             blocks.append(ChangeBlock(rowID: rows[start].id,
                                       fraction: CGFloat(start) / total,
                                       extent: CGFloat(i - start) / total,
@@ -272,7 +289,8 @@ public struct FileDiffView: View {
     private var metrics: DiffMetrics {
         DiffMetrics(fontSize: CGFloat(fontSize),
                     digits: built.digits,
-                    unified: layout == .unified)
+                    unified: layout == .unified,
+                    density: density)
     }
 
     public var body: some View {
@@ -303,12 +321,16 @@ public struct FileDiffView: View {
                                 case .hunkHeader(_, let text):
                                     HunkHeaderView(text: text, metrics: metrics)
                                 case .finding(let f):
-                                    InlineFindingView(finding: f)
-                                case .comment(let c):
-                                    CommentCardView(comment: c,
-                                                    onReply: { body in onReplyComment(c, body) },
-                                                    onResolve: { onResolveComment(c) },
-                                                    onEdit: onEditComment?(c))
+                                    InlineFindingView(finding: f, sideBySide: layout == .sideBySide,
+                                                      onDismiss: onDismissFinding.map { dismiss in { dismiss(f) } })
+                                case .thread(let thread):
+                                    ThreadCardView(thread: thread,
+                                                   onReply: { body in onReplyComment(thread.root, body) },
+                                                   onResolve: { onResolveComment(thread.root) },
+                                                   onEdit: { onEditComment?($0) })
+                                        .padding(.vertical, Spacing.sm)
+                                        .padding(.trailing, Spacing.xl)
+                                        .frame(maxWidth: .infinity, alignment: .trailing)
                                 case .row(let row):
                                     DiffRowView(row: row, layout: layout,
                                                 language: language,
@@ -322,7 +344,8 @@ public struct FileDiffView: View {
                                                 onContextAsk: { id in askAbout(rowID: id) },
                                                 onContextCopy: { id in copyRows(rowID: id) },
                                                 onContextComment: onAddComment == nil
-                                                    ? nil : { id in startComment(rowID: id) })
+                                                    ? nil : { id in startComment(rowID: id) },
+                                                onContextCopyReference: { id in copyReference(rowID: id) })
                                         // Scroll targets address rows by id;
                                         // only rendered rows pay for it.
                                         .id("r\(row.id)")
@@ -407,6 +430,11 @@ public struct FileDiffView: View {
                         }
                     }
                     .onChange(of: focusLine) { focusIfNeeded(proxy) }
+                    .onChange(of: command) { _, new in
+                        guard let new else { return }
+                        command = nil
+                        run(new, proxy)
+                    }
                     .onChange(of: expandedRegions) { _, _ in respliceItems() }
                 }
                 .overlay {
@@ -461,6 +489,38 @@ public struct FileDiffView: View {
         }
     }
 
+    private func run(_ command: DiffCommand, _ proxy: ScrollViewProxy) {
+        switch command.kind {
+        case .nextChange, .previousChange:
+            let blocks = built.changeBlocks
+            guard !blocks.isEmpty else { return }
+            let step = command.kind == .nextChange ? 1 : -1
+            // First press lands on the first change, or the last going back.
+            let next = changeCursor.map { min(blocks.count - 1, max(0, $0 + step)) }
+                ?? (step > 0 ? 0 : blocks.count - 1)
+            changeCursor = next
+            let rowID = blocks[next].rowID
+            if let region = built.regionOfRow[rowID], !expandedRegions.contains(region) {
+                expandedRegions.insert(region)
+                respliceItems()
+            }
+            selection = LineSelection(anchor: rowID, head: rowID)
+            proxy.scrollTo("r\(rowID)", anchor: UnitPoint(x: 0, y: 0.3))
+        case .comment:
+            guard onAddComment != nil, let row = selection?.range.lowerBound else {
+                notice = "Select the lines to comment on first."
+                return
+            }
+            startComment(rowID: row)
+        case .ask:
+            guard let row = selection?.range.lowerBound else {
+                notice = "Select the lines to ask about first."
+                return
+            }
+            askAbout(rowID: row)
+        }
+    }
+
     /// Right-click "Ask Claude": acts on the current multi-line selection when
     /// the clicked row is inside it, otherwise on the clicked row alone.
     private func effectiveSelection(for rowID: Int) -> LineSelection {
@@ -501,6 +561,17 @@ public struct FileDiffView: View {
         let text = SelectionLogic.selectedText(rows: built.allRows, selection: sel)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// "src/form/main.py:105-106", the form every tracker and chat links.
+    private func copyReference(rowID: Int) {
+        let sel = effectiveSelection(for: rowID)
+        let lines = built.allRows.filter { sel.range.contains($0.id) }
+            .compactMap { ($0.right ?? $0.left)?.newNumber ?? ($0.left ?? $0.right)?.oldNumber }
+        guard let low = lines.min(), let high = lines.max() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(low == high ? "\(file.path):\(low)" : "\(file.path):\(low)-\(high)",
+                                       forType: .string)
     }
 
     private func columnWidths(paneWidth: CGFloat) -> (left: CGFloat?, right: CGFloat?) {
@@ -546,7 +617,12 @@ public struct FileDiffView: View {
             expandedRegions.insert(region)
             respliceItems()
         }
-        withAnimation { proxy.scrollTo("r\(row.id)", anchor: .center) }
+        // Unanimated, and a tick later. Animating a jump across a lazy list
+        // realises every row in between and then gives up, leaving the view at
+        // the first change instead of the line asked for; and the rows opened
+        // above are not in the hierarchy until the next update.
+        let target = "r\(row.id)"
+        DispatchQueue.main.async { proxy.scrollTo(target, anchor: .center) }
         onFocused()
     }
 
@@ -583,24 +659,24 @@ struct CollapsedBandView: View {
 
     var body: some View {
         Button(action: expand) {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "chevron.down.circle")
-                    .imageScale(.small)
-                    .frame(width: metrics.totalGutter, alignment: .center)
+            HStack(spacing: Spacing.sm + 2) {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .frame(width: metrics.totalGutter - Spacing.sm, alignment: .trailing)
                 Text("\(lines) unchanged line\(lines == 1 ? "" : "s")")
                     .font(Typography.meta)
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(.secondary)
-            .padding(.vertical, Spacing.xs)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(hovering ? Palette.hover : Palette.surface)
+            .foregroundStyle(hovering ? Palette.text : Palette.textTertiary)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .background(hovering ? Palette.surfaceRaised : Palette.band)
             .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
             .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .padding(.vertical, Spacing.xs)
         .help("Show these lines")
         .accessibilityLabel("Show \(lines) unchanged lines")
     }
@@ -635,11 +711,11 @@ struct NoticeBanner: View {
                 .accessibilityLabel("Dismiss")
         }
         .font(Typography.meta)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, Spacing.md)
-        .padding(.vertical, Spacing.xs)
+        .foregroundStyle(Palette.textSecondary)
+        .padding(.horizontal, Spacing.lg)
+        .padding(.vertical, Spacing.xs + 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.surfaceRaised)
+        .background(Palette.band)
         .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
     }
 }
@@ -659,11 +735,11 @@ struct GeneratedFileBanner: View {
             Spacer(minLength: 0)
         }
         .font(Typography.meta)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, Spacing.md)
-        .padding(.vertical, Spacing.xs)
+        .foregroundStyle(Palette.textSecondary)
+        .padding(.horizontal, Spacing.lg)
+        .padding(.vertical, Spacing.xs + 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.surfaceRaised)
+        .background(Palette.band)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Palette.hairline).frame(height: 1)
         }
@@ -679,8 +755,9 @@ public struct MarkdownBodyView: View {
     public init(text: String) { self.text = text }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(CommentBodySegment.parse(text).enumerated()), id: \.offset) { _, seg in
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            ForEach(Array(CommentBodySegment.parse(CommentHTML.markdown(from: text)).enumerated()),
+                    id: \.offset) { _, seg in
                 switch seg {
                 case .text(let t):
                     // Split out markdown heading lines (inline-only parsing
@@ -688,13 +765,17 @@ public struct MarkdownBodyView: View {
                     ForEach(Array(Self.headingChunks(t).enumerated()), id: \.offset) { _, chunk in
                         if chunk.isHeading {
                             Text(chunk.text)
-                                .font(.headline)
-                                .padding(.top, 4)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Palette.textStrong)
+                                .padding(.top, Spacing.xs)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
                             Text(Self.inline(chunk.text, codeFamily: codeFontFamily, repoSlug: repoSlug))
                                 .font(Typography.body)
+                                .foregroundStyle(Palette.text)
+                                .lineSpacing(Typography.bodyLineSpacing)
+                                .tint(Palette.accent)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -703,9 +784,10 @@ public struct MarkdownBodyView: View {
                     ScrollView(.horizontal) {
                         Text(highlighter.highlightedAuto(c))
                             .textSelection(.enabled)
-                            .padding(8)
+                            .padding(Spacing.sm + 2)
                     }
-                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
+                    .background(Palette.canvas, in: RoundedRectangle(cornerRadius: Radius.md))
+                    .overlay { RoundedRectangle(cornerRadius: Radius.md).strokeBorder(Palette.hairline) }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -836,12 +918,9 @@ extension MarkdownBodyView {
     }
 }
 
-/// Inline review-comment card, IntelliJ-style: author, age, body with fenced
-/// code blocks rendered as code, plus Reply and Resolve actions.
-///
-/// `indented` is what the diff view needs and the comments list does not: in
-/// the diff the card floats under a code row and is inset to clear the gutter,
-/// while in a list it fills its container.
+/// One comment: who, when, what they said. No box of its own — the thread
+/// card (in the diff) or the thread list (in the Threads pane) supplies that,
+/// so a conversation reads as one thing rather than a stack of cards.
 public struct CommentCardView: View {
     let comment: ReviewComment
     var onReply: (String) -> Void = { _ in }
@@ -849,9 +928,8 @@ public struct CommentCardView: View {
     /// nil when the comment is not the signed-in user's, which is what hides
     /// the Edit action rather than showing one that would fail.
     var onEdit: ((String) -> Void)?
+    /// Kept for source compatibility; the thread card owns layout now.
     var indented: Bool = true
-    @State private var replying = false
-    @State private var replyText = ""
     @State private var editing = false
     @State private var editText = ""
 
@@ -867,90 +945,59 @@ public struct CommentCardView: View {
         self.indented = indented
     }
 
-    private var age: String { Dates.age(iso: comment.createdAt) }
-
     public var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: comment.inReplyToID == nil ? "bubble.left" : "arrow.turn.down.right")
-                    .imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Text(comment.author).font(.callout.bold())
-                Text(age).font(.caption).foregroundStyle(.secondary)
-                if comment.resolved {
-                    Label("Resolved", systemImage: "checkmark.seal.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                }
-            }
-
-            if editing {
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    TextEditor(text: $editText)
-                        .font(Typography.body)
-                        .frame(minHeight: 68)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: Radius.sm)
-                                .strokeBorder(Palette.cardBorder)
+        HStack(alignment: .top, spacing: Spacing.sm + 2) {
+            AvatarDisc(login: comment.author)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
+                    Text(comment.author)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Palette.textStrong)
+                    Text(Dates.age(iso: comment.createdAt))
+                        .font(Typography.meta).foregroundStyle(Palette.textTertiary)
+                    Spacer(minLength: 0)
+                    if onEdit != nil, !editing {
+                        Button("Edit") {
+                            editText = comment.body
+                            editing = true
                         }
-                    HStack {
-                        Spacer()
-                        Button("Cancel") { editing = false }
-                        Button("Save") { submitEdit() }
-                            .keyboardShortcut(.return, modifiers: .command)
-                            .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || editText == comment.body)
+                        .buttonStyle(QuietButtonStyle(tint: Palette.textSecondary))
                     }
-                    .font(Typography.meta)
                 }
-            } else {
-                MarkdownBodyView(text: comment.body)
-            }
-
-            HStack(spacing: 12) {
-                Button(replying ? "Cancel" : "Reply") {
-                    replying.toggle()
-                    replyText = ""
-                }
-                .buttonStyle(.link)
-                .font(.caption)
-                if onEdit != nil, !editing {
-                    Button("Edit") {
-                        editText = comment.body
-                        editing = true
-                        replying = false
+                if editing {
+                    VStack(alignment: .trailing, spacing: Spacing.sm) {
+                        ComposerEditor(text: $editText, minHeight: 68)
+                        HStack(spacing: Spacing.sm) {
+                            Button("Cancel") { editing = false }
+                                .buttonStyle(SecondaryButtonStyle())
+                            Button("Save") { submitEdit() }
+                                .buttonStyle(PrimaryButtonStyle())
+                                .keyboardShortcut(.return, modifiers: .command)
+                                .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                          || editText == comment.body)
+                        }
                     }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                }
-                if comment.inReplyToID == nil, comment.threadID != nil, !comment.resolved {
-                    Button("Resolve") { onResolve() }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                }
-            }
-            if replying {
-                HStack {
-                    TextField("Reply…", text: $replyText, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { submitReply() }
-                    Button("Send") { submitReply() }
-                        .disabled(replyText.trimmingCharacters(in: .whitespaces).isEmpty)
+                } else {
+                    MarkdownBodyView(text: comment.body)
                 }
             }
         }
-        .padding(10)
-        .background(.quaternary.opacity(comment.resolved ? 0.3 : 0.6), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Palette.cardBorder)
+        .contextMenu {
+            Button("Copy Comment") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(comment.body, forType: .string)
+            }
+            Button("Copy as Quote") {
+                let quoted = comment.body.split(separator: "\n", omittingEmptySubsequences: false)
+                    .map { "> \($0)" }.joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(quoted, forType: .string)
+            }
+            if onEdit != nil {
+                Divider()
+                Button("Edit") { editText = comment.body; editing = true }
+            }
         }
-        .opacity(comment.resolved ? 0.75 : 1)
-        .padding(.vertical, 4)
-        .padding(.leading, indented ? (comment.inReplyToID == nil ? 60 : 84)
-                                    : (comment.inReplyToID == nil ? 0 : 22))
-        .padding(.trailing, indented ? 16 : 0)
-        .frame(maxWidth: indented ? 760 : .infinity, alignment: .leading)
     }
 
     private func submitEdit() {
@@ -959,15 +1006,129 @@ public struct CommentCardView: View {
         onEdit?(text)
         editing = false
     }
+}
+
+/// A bordered multi-line editor in the app's own surfaces.
+public struct ComposerEditor: View {
+    @Binding var text: String
+    var minHeight: CGFloat = 120
+
+    public init(text: Binding<String>, minHeight: CGFloat = 120) {
+        self._text = text
+        self.minHeight = minHeight
+    }
+
+    public var body: some View {
+        TextEditor(text: $text)
+            .font(Typography.body)
+            .lineSpacing(Typography.bodyLineSpacing)
+            .scrollContentBackground(.hidden)
+            .padding(Spacing.sm)
+            .frame(minHeight: minHeight)
+            .background(Palette.canvas, in: RoundedRectangle(cornerRadius: Radius.md))
+            .overlay { RoundedRectangle(cornerRadius: Radius.md).strokeBorder(Palette.cardBorder) }
+    }
+}
+
+/// A review conversation, anchored under its line: every comment in one card,
+/// one reply field, one Resolve.
+public struct ThreadCardView: View {
+    let thread: CommentThread
+    var onReply: (String) -> Void
+    var onResolve: () -> Void
+    /// The edit handler for a given comment, or nil when it is not the user's.
+    var onEdit: (ReviewComment) -> ((String) -> Void)?
+    /// Fills its container (the Threads pane) rather than sitting at reading
+    /// width under a line of code.
+    var fillsWidth = false
+    @State private var replyText = ""
+    @State private var expandedResolved = false
+    @FocusState private var replying: Bool
+
+    public init(thread: CommentThread,
+                onReply: @escaping (String) -> Void,
+                onResolve: @escaping () -> Void,
+                onEdit: @escaping (ReviewComment) -> ((String) -> Void)? = { _ in nil },
+                fillsWidth: Bool = false) {
+        self.thread = thread
+        self.onReply = onReply
+        self.onResolve = onResolve
+        self.onEdit = onEdit
+        self.fillsWidth = fillsWidth
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if thread.resolved && !expandedResolved {
+                resolvedSummary
+            } else {
+                ForEach(Array(thread.comments.enumerated()), id: \.element.id) { index, comment in
+                    if index > 0 { Rectangle().fill(Palette.hairline).frame(height: 1) }
+                    CommentCardView(comment: comment, onEdit: onEdit(comment))
+                        .padding(.horizontal, Spacing.md + 2)
+                        .padding(.vertical, Spacing.md)
+                }
+                footer
+            }
+        }
+        .frame(maxWidth: fillsWidth ? .infinity : 560, alignment: .leading)
+        .card(border: thread.resolved ? Palette.cardBorder : Palette.amber.opacity(0.45))
+        .opacity(thread.resolved ? 0.8 : 1)
+    }
+
+    /// A settled conversation folds to a line: it is history, and leaving it
+    /// open pushed the code it was about off the screen.
+    private var resolvedSummary: some View {
+        Button { expandedResolved = true } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.added)
+                Text("Resolved").fontWeight(.medium).foregroundStyle(Palette.text)
+                Text("\(thread.participants.joined(separator: ", ")) \u{00B7} \(thread.comments.count) comment\(thread.comments.count == 1 ? "" : "s")")
+                    .foregroundStyle(Palette.textTertiary).lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Palette.textTertiary)
+            }
+            .font(Typography.control)
+            .padding(.horizontal, Spacing.md + 2)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show the resolved conversation")
+    }
+
+    private var footer: some View {
+        HStack(spacing: Spacing.sm) {
+            TextField("Reply\u{2026}", text: $replyText, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Typography.body)
+                .lineLimit(1...6)
+                .focused($replying)
+                .onSubmit { submitReply() }
+                .padding(.horizontal, Spacing.sm + 2)
+                .padding(.vertical, 6)
+                .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 7))
+                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.cardBorder) }
+            if !replyText.trimmingCharacters(in: .whitespaces).isEmpty {
+                Button("Send") { submitReply() }.buttonStyle(PrimaryButtonStyle())
+            } else if thread.root.threadID != nil, !thread.resolved {
+                Button("Resolve") { onResolve() }.buttonStyle(SecondaryButtonStyle())
+            }
+        }
+        .padding(.horizontal, Spacing.md + 2)
+        .padding(.vertical, Spacing.sm + 2)
+        .background(Palette.chrome.opacity(0.6))
+        .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
+    }
 
     private func submitReply() {
         let text = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         onReply(text)
-        replying = false
         replyText = ""
+        replying = false
     }
-
 }
 
 /// One run of changed rows, positioned as a fraction of the file.
@@ -1003,12 +1164,13 @@ struct ChangeRailView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                Palette.surface
+                Palette.band
+                Rectangle().fill(Palette.hairline).frame(width: 1)
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(block.color.opacity(0.9))
-                        .frame(width: 7, height: max(3, block.extent * geo.size.height))
-                        .offset(x: 2.5, y: block.fraction * geo.size.height)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(block.color)
+                        .frame(width: 6, height: max(4, block.extent * geo.size.height))
+                        .offset(x: 3.5, y: block.fraction * geo.size.height)
                 }
             }
             .contentShape(Rectangle())
@@ -1048,54 +1210,78 @@ struct ChangeRailView: View {
 /// is about.
 struct InlineFindingView: View {
     let finding: Finding
+    /// In a split diff the note sits under the new side, where its line is.
+    var sideBySide = false
+    var onDismiss: (() -> Void)?
     @State private var expanded = false
 
     private var tint: Color {
         switch finding.severity.lowercased() {
-        case "high": return Palette.removed
-        case "medium": return Palette.warning
-        default: return .secondary
+        case "high": return Palette.removedText
+        case "medium": return Palette.amber
+        default: return Palette.textSecondary
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.xxs) {
-            HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .imageScale(.small).foregroundStyle(tint)
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11.5, weight: .medium)).foregroundStyle(tint)
                 Text(finding.severity.uppercased())
-                    .font(.caption2.bold()).foregroundStyle(tint)
-                // Clamped until opened: an unclamped explanation ran seven
+                    .font(.system(size: 10.5, weight: .bold)).kerning(0.5).foregroundStyle(tint)
+                // One line until opened: an unclamped explanation ran seven
                 // lines and shoved the code it annotates off the screen.
                 Text(finding.explanation)
-                    .font(Typography.meta)
-                    .foregroundStyle(finding.dismissed ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                    .font(Typography.control)
+                    .foregroundStyle(finding.dismissed ? Palette.textTertiary : Palette.text)
                     .strikethrough(finding.dismissed)
-                    .lineLimit(expanded ? nil : 2)
+                    .lineLimit(expanded ? nil : 1)
+                    .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: expanded)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
-                if true {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .imageScale(.small).foregroundStyle(.tertiary)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
+                    .foregroundStyle(Palette.textTertiary)
+            }
+            if expanded {
+                if !finding.failureScenario.isEmpty {
+                    Text(finding.failureScenario)
+                        .font(Typography.control).foregroundStyle(Palette.textSecondary)
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, Spacing.xl - 2)
+                }
+                if let onDismiss, !finding.dismissed {
+                    Button("Dismiss", action: onDismiss)
+                        .buttonStyle(QuietButtonStyle(tint: Palette.textSecondary))
+                        .padding(.leading, Spacing.xl - 2)
+                        .padding(.top, 2)
                 }
             }
-            if expanded, !finding.failureScenario.isEmpty {
-                Text(finding.failureScenario)
-                    .font(Typography.meta).foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, Spacing.lg)
-            }
         }
-        .padding(.horizontal, Spacing.sm)
-        .padding(.vertical, Spacing.xs)
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm - 1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tint.opacity(0.08))
-        .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 2) }
+        .overlay(alignment: .top) { Rectangle().fill(tint.opacity(0.28)).frame(height: 1) }
+        .overlay(alignment: .bottom) { Rectangle().fill(tint.opacity(0.28)).frame(height: 1) }
         .contentShape(Rectangle())
-        .onTapGesture { expanded.toggle() }
-        .help(finding.failureScenario.isEmpty ? finding.explanation : finding.failureScenario)
+        .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() } }
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button("Copy Finding") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    "[\(finding.severity)] \(finding.file):\(finding.line)\n\(finding.explanation)"
+                    + (finding.failureScenario.isEmpty ? "" : "\n\(finding.failureScenario)"),
+                    forType: .string)
+            }
+            if let onDismiss, !finding.dismissed { Button("Dismiss Finding", action: onDismiss) }
+        }
     }
 }
 
@@ -1187,6 +1373,17 @@ struct CommentTarget: Identifiable, Equatable {
     var id: String { "\(startLine)-\(endLine)" }
 }
 
+/// A keyboard command for the diff, sent down from whoever owns the keys.
+///
+/// Each one carries its own identity so pressing N twice is two changes of
+/// value, not one.
+public struct DiffCommand: Equatable {
+    public enum Kind: Sendable { case nextChange, previousChange, comment, ask }
+    public let kind: Kind
+    private let id = UUID()
+    public init(_ kind: Kind) { self.kind = kind }
+}
+
 /// Composer for a new review thread on a line or range.
 struct NewCommentSheet: View {
     let path: String
@@ -1212,44 +1409,41 @@ struct NewCommentSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
+        VStack(alignment: .leading, spacing: Spacing.md) {
             HStack(spacing: Spacing.sm) {
-                Image(systemName: "bubble.left.and.text.bubble.right")
-                    .foregroundStyle(.secondary)
                 Text("New comment").font(Typography.sectionTitle)
+                    .foregroundStyle(Palette.textStrong)
                 Text(targetLabel)
-                    .font(Typography.path)
-                    .padding(.horizontal, Spacing.xs).padding(.vertical, 1)
-                    .background(.quaternary, in: Capsule())
+                    .font(Typography.identifier).foregroundStyle(Palette.textSecondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 5))
                 Spacer()
             }
-            TextEditor(text: $body_)
-                .font(Typography.body)
-                .frame(minHeight: 120)
-                .overlay {
-                    RoundedRectangle(cornerRadius: Radius.sm).strokeBorder(Palette.cardBorder)
-                }
-            HStack {
+            ComposerEditor(text: $body_, minHeight: 130)
+            HStack(spacing: Spacing.sm) {
                 // The most common failure is picking a line GitHub does not
                 // consider part of the diff, so say where it will land.
-                Text("Anchors to the PR's head commit.")
-                    .font(Typography.meta).foregroundStyle(.secondary)
+                Text("Anchors to the PR\u{2019}s head commit. Markdown works.")
+                    .font(Typography.meta).foregroundStyle(Palette.textTertiary)
                 Spacer()
                 Button("Cancel", action: onCancel)
+                    .buttonStyle(SecondaryButtonStyle())
                     .keyboardShortcut(.cancelAction)
                 // Posting on its own is still right for a one-line "typo
                 // here"; everything else belongs in the review.
                 Button("Post now") { onSend(trimmed) }
+                    .buttonStyle(SecondaryButtonStyle())
                     .disabled(trimmed.isEmpty)
                 Button(stagedCount == 0 ? "Add to review" : "Add to review (\(stagedCount + 1))") {
                     onStage(trimmed)
                 }
+                .buttonStyle(PrimaryButtonStyle())
                 .keyboardShortcut(.return, modifiers: .command)
-                .buttonStyle(.borderedProminent)
                 .disabled(trimmed.isEmpty)
             }
         }
         .padding(Spacing.lg)
-        .frame(width: 520)
+        .frame(width: 540)
+        .background(Palette.floating)
     }
 }

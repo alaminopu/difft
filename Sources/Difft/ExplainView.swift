@@ -22,7 +22,6 @@ struct ExplainView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             content
         }
     }
@@ -30,44 +29,30 @@ struct ExplainView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: Spacing.sm) {
-            OverviewBackButton()
-            Divider().frame(height: 14)
-            Image(systemName: "sparkles")
-                .foregroundStyle(Color.accentColor)
-                .imageScale(.small)
-            Text("Explain diff").font(Typography.sectionTitle)
+        PaneHeader {
+            Text("Walkthrough").font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
             if let e = session.data.explanation {
                 Text(provenance(e))
                     .font(Typography.meta)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(isStale(e) ? Palette.amber : Palette.textTertiary)
                     .lineLimit(1)
             }
-            Spacer(minLength: Spacing.sm)
+        } trailing: {
             if case .running(let label) = session.agentState, label == "Explaining" {
-                ProgressView().controlSize(.small)
+                ProgressView().controlSize(.small).scaleEffect(0.8)
                 if let started = controller.runStartedAt { ElapsedLabel(start: started) }
-                Button("Stop") { controller.cancel() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
-                    .font(.callout)
+                Button("Stop") { controller.cancel() }.buttonStyle(SecondaryButtonStyle())
             } else if session.data.explanation != nil {
                 Button {
                     Task { await model.explainDiff(force: true) }
                 } label: {
                     Label("Regenerate", systemImage: "arrow.clockwise")
-                        .labelStyle(.titleAndIcon)
-                        .font(.callout)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
+                .buttonStyle(SecondaryButtonStyle())
                 .disabled(!session.agentState.canStart)
                 .help("Run the walkthrough again against the current head")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     /// "2 minutes ago · a1b2c3d", plus a warning when the branch has moved on
@@ -109,7 +94,7 @@ struct ExplainView: View {
             ProgressView()
             Text("Reading the changed files and their callers…")
                 .font(Typography.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Palette.textSecondary)
             // The tool log is the only sign of progress on a long run; without
             // it a two-minute read looks like a hang.
             if !controller.toolActivity.isEmpty {
@@ -119,8 +104,8 @@ struct ExplainView: View {
                             Text(call.name).font(.caption.bold())
                             if let detail = call.detail {
                                 Text(detail)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
+                                    .font(Typography.identifier)
+                                    .foregroundStyle(Palette.textSecondary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
@@ -153,7 +138,7 @@ struct ExplainView: View {
             } label: {
                 Label("Explain this PR", systemImage: "sparkles")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(PrimaryButtonStyle())
             .disabled(!session.agentState.canStart)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -164,7 +149,9 @@ struct ExplainView: View {
             VStack(alignment: .leading, spacing: Spacing.lg) {
                 if !e.summary.isEmpty {
                     Text(e.summary)
-                        .font(.title3)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Palette.textStrong)
+                        .lineSpacing(5)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -172,7 +159,8 @@ struct ExplainView: View {
                     labelled("Why", systemImage: "questionmark.circle") {
                         VStack(alignment: .leading, spacing: Spacing.xs) {
                             Text(e.motivation)
-                                .font(Typography.body)
+                                .font(Typography.body).foregroundStyle(Palette.text)
+                                .lineSpacing(Typography.bodyLineSpacing)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                             // Marked, not hidden. An intent reconstructed from
@@ -222,7 +210,7 @@ struct ExplainView: View {
                             ForEach(Array(e.mechanical.enumerated()), id: \.offset) { _, item in
                                 Text("• " + item)
                                     .font(Typography.body)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Palette.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -233,7 +221,7 @@ struct ExplainView: View {
                         sectionTitle("Before you approve", systemImage: "checkmark.circle")
                         Text("You do not pass on code whose explanation you cannot give. "
                              + "If one of these is a guess, go back to the diff.")
-                            .font(Typography.meta).foregroundStyle(.secondary)
+                            .font(Typography.meta).foregroundStyle(Palette.textSecondary)
                         ForEach(Array(e.quiz.enumerated()), id: \.offset) { index, q in
                             QuizCard(index: index + 1, question: q, session: session)
                         }
@@ -245,7 +233,7 @@ struct ExplainView: View {
                             ForEach(Array(e.outOfScope.enumerated()), id: \.offset) { _, item in
                                 Text("• " + item)
                                     .font(Typography.body)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Palette.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
@@ -272,7 +260,8 @@ struct ExplainView: View {
             Text(text)
         }
         .font(Typography.sectionTitle)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(Palette.textSecondary)
+        .padding(.top, Spacing.xs)
     }
 
     @ViewBuilder private func labelled<Content: View>(
@@ -305,9 +294,9 @@ private struct AreaCard: View {
         HStack(alignment: .top, spacing: Spacing.sm) {
             Text("\(index)")
                 .font(.caption.monospacedDigit().bold())
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Palette.accent)
                 .frame(width: 20, height: 20)
-                .background(Color.accentColor.opacity(0.12), in: Circle())
+                .background(Palette.activeChip, in: Circle())
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 if !area.title.isEmpty {
                     Text(area.title)
@@ -316,7 +305,8 @@ private struct AreaCard: View {
                 }
                 if !area.detail.isEmpty {
                     Text(area.detail)
-                        .font(Typography.body)
+                        .font(Typography.body).foregroundStyle(Palette.text)
+                        .lineSpacing(Typography.bodyLineSpacing)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -333,12 +323,7 @@ private struct AreaCard: View {
         }
         .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: Radius.lg))
-        .overlay {
-            RoundedRectangle(cornerRadius: Radius.lg)
-                .strokeBorder(Palette.cardBorder)
-                .allowsHitTesting(false)
-        }
+        .card()
     }
 }
 
@@ -356,14 +341,14 @@ private struct FileChips: View {
                 let known = model.files.contains { $0.path == path }
                 Button { onOpen(path) } label: {
                     Text(String(path.split(separator: "/").last ?? Substring(path)))
-                        .font(.caption.monospaced())
+                        .font(Typography.identifier)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(.quaternary.opacity(known ? 0.6 : 0.25),
+                        .background(Palette.surfaceRaised.opacity(known ? 1 : 0.5),
                                     in: RoundedRectangle(cornerRadius: Radius.sm))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(known ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                .foregroundStyle(known ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(Palette.textTertiary))
                 .disabled(!known)
                 .help(known ? path : "\(path) — not part of this diff")
             }
@@ -382,15 +367,15 @@ private struct AnchorRow: View {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.xs) {
                 Image(systemName: "arrow.right.circle")
                     .imageScale(.small)
-                    .foregroundStyle(known ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(known ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(Palette.textTertiary))
                 Text(location)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(known ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    .font(Typography.identifier)
+                    .foregroundStyle(known ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(Palette.textTertiary))
                     .lineLimit(1)
                     .truncationMode(.head)
                 Text(anchor.what)
                     .font(Typography.meta)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Palette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
@@ -455,9 +440,9 @@ private struct QuizCard: View {
             HStack(alignment: .firstTextBaseline, spacing: Spacing.sm) {
                 Text("\(index)")
                     .font(.caption.monospacedDigit().bold())
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Palette.accent)
                     .frame(width: 20, height: 20)
-                    .background(Color.accentColor.opacity(0.12), in: Circle())
+                    .background(Palette.activeChip, in: Circle())
                 Text(question.question)
                     .font(Typography.body).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -490,7 +475,7 @@ private struct QuizCard: View {
             }
             if picked != nil, !question.why.isEmpty {
                 Text(question.why)
-                    .font(Typography.meta).foregroundStyle(.secondary)
+                    .font(Typography.meta).foregroundStyle(Palette.textSecondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, Spacing.xxs)
@@ -498,12 +483,7 @@ private struct QuizCard: View {
         }
         .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: Radius.lg))
-        .overlay {
-            RoundedRectangle(cornerRadius: Radius.lg)
-                .strokeBorder(Palette.cardBorder)
-                .allowsHitTesting(false)
-        }
+        .card()
     }
 
     private var isAnswered: Bool { picked != nil }
@@ -515,9 +495,9 @@ private struct QuizCard: View {
     }
 
     private func markerColor(for i: Int) -> Color {
-        guard isAnswered else { return .secondary }
+        guard isAnswered else { return Palette.textSecondary }
         if i == question.answer { return Palette.added }
-        return i == picked ? Palette.removed : .secondary
+        return i == picked ? Palette.removed : Palette.textSecondary
     }
 
     private func background(for i: Int) -> Color {

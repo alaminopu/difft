@@ -2,11 +2,20 @@ import SwiftUI
 import DifftCore
 import DifftServices
 
+/// What a saved session says the reader has already done on a PR.
+struct ReviewProgress: Equatable, Sendable {
+    var viewed: Int
+    var drafts: Int
+    var findings: Int
+    var hasAnything: Bool { viewed > 0 || drafts > 0 || findings > 0 }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var repoDir: URL? {
         didSet {
             UserDefaults.standard.set(repoDir?.path, forKey: "repoDir")
+            if let repoDir { noteRecent(repoDir) }
             // Authors belong to a repository; carrying them across would filter
             // the new list by people who have never touched it.
             prAuthors = []
@@ -14,6 +23,12 @@ final class AppModel: ObservableObject {
             contributorsLoadedFor = nil
         }
     }
+    /// Checkouts opened before, newest first, for the home page and the
+    /// repository menu.
+    @Published private(set) var recentRepos: [URL] = []
+    /// What the reader has already done on each listed PR, so the list can say
+    /// which ones are half-reviewed. Filled off the main actor after a load.
+    @Published private(set) var reviewProgress: [Int: ReviewProgress] = [:]
     @Published var prs: [PullRequest] = []
     /// Which PRs the list asks for, and what it asks for them by. Both live
     /// here rather than in the sidebar so the background refresh re-runs the
@@ -131,6 +146,8 @@ final class AppModel: ObservableObject {
 
     init() {
         sessionStore = SessionStore(directory: Self.appSupportDir.appendingPathComponent("sessions"))
+        recentRepos = (UserDefaults.standard.stringArray(forKey: "recentRepos") ?? [])
+            .map { URL(fileURLWithPath: $0) }
         if let path = UserDefaults.standard.string(forKey: "repoDir") {
             repoDir = URL(fileURLWithPath: path)
         }
@@ -142,6 +159,61 @@ final class AppModel: ObservableObject {
     }
 
     var repoName: String { repoDir?.lastPathComponent ?? "" }
+
+    static let maxRecents = 8
+
+    private func noteRecent(_ url: URL) {
+        var list = recentRepos.filter { $0.standardizedFileURL != url.standardizedFileURL }
+        list.insert(url, at: 0)
+        recentRepos = Array(list.prefix(Self.maxRecents))
+        UserDefaults.standard.set(recentRepos.map(\.path), forKey: "recentRepos")
+    }
+
+    func removeRecent(_ url: URL) {
+        recentRepos.removeAll { $0.standardizedFileURL == url.standardizedFileURL }
+        UserDefaults.standard.set(recentRepos.map(\.path), forKey: "recentRepos")
+    }
+
+    /// Back to the home page. The checkout itself is untouched.
+    func closeRepository() {
+        closePullRequest()
+        prs = []
+        reviewProgress = [:]
+        repoSlug = nil
+        errorBanner = nil
+        repoDir = nil
+    }
+
+    private var progressLoadedFor: Set<Int> = []
+
+    /// Back to the pull request list.
+    func closePullRequest() {
+        // What was just done in the session is what the list should now say.
+        if session != nil { loadReviewProgress() }
+        session = nil
+        files = []
+        comments = []
+        commits = []
+        commitFiles = []
+    }
+
+    /// Reads the saved session of every listed PR for its progress. Off the
+    /// main actor: each is a JSON file holding a whole chat transcript.
+    func loadReviewProgress() {
+        let store = sessionStore, repo = repoName, numbers = prs.map(\.number)
+        progressLoadedFor = Set(numbers)
+        Task.detached(priority: .utility) {
+            var found: [Int: ReviewProgress] = [:]
+            for number in numbers {
+                guard let data = store.load(repo: repo, prNumber: number) else { continue }
+                let progress = ReviewProgress(viewed: data.viewedFiles.count,
+                                              drafts: data.draftComments.count,
+                                              findings: data.findings.count { !$0.dismissed })
+                if progress.hasAnything { found[number] = progress }
+            }
+            await MainActor.run { [found] in self.reviewProgress = found }
+        }
+    }
 
     /// Shows the open panel and switches to whatever is chosen.
     ///
@@ -293,6 +365,10 @@ final class AppModel: ObservableObject {
             guard token == prLoadToken else { return }
             prs = found
             prsTruncated = filledPage
+            // The minute-by-minute poll re-read every saved session each time.
+            // Progress only changes when a PR is reviewed, which reloads it on
+            // the way back to this list, or when the list itself changes.
+            if !silent || Set(found.map(\.number)) != progressLoadedFor { loadReviewProgress() }
             addAuthors(found.map(\.authorLogin) + Array(authors))
             errorBanner = nil
         } catch {
@@ -552,6 +628,7 @@ final class AppModel: ObservableObject {
             let data = sessionStore.load(repo: repoName, prNumber: pr.number)
                 ?? SessionData(pr: pr, repoDir: repoDir.path, viewedFiles: [], chat: [], findings: [])
             session = ReviewSession(data: data)
+            lastOpenedFile = nil
             // Land on the PR overview; the user picks a file from the tree.
             session?.selectedFile = nil
             errorBanner = nil
@@ -629,7 +706,12 @@ final class AppModel: ObservableObject {
         sessionStore.saveInBackground(session.data)
     }
 
+    /// The file the reader was last in, so leaving for the overview and
+    /// coming back to Files lands where they were rather than at the top.
+    private(set) var lastOpenedFile: String?
+
     func showOverview() {
+        if let current = session?.selectedFile { lastOpenedFile = current }
         session?.selectedFile = nil
         session?.pane = .diff
         closeCommit()

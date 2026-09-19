@@ -59,7 +59,6 @@ struct PRCommentsView: View {
         let visible = visibleThreads
         VStack(spacing: 0) {
             header
-            Divider()
             // Verdicts first: whether the PR is blocked outranks any
             // individual note under it.
             if !model.reviews.isEmpty { VerdictList(reviews: model.reviews) }
@@ -84,65 +83,32 @@ struct PRCommentsView: View {
 
     private var header: some View {
         let unresolved = model.unresolvedThreadCount
-        return VStack(spacing: 8) {
-            HStack(spacing: 10) {
-                OverviewBackButton()
-                Divider().frame(height: 14)
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .foregroundStyle(.secondary)
-                Text("Review comments").font(Typography.sectionTitle)
-                Text(verbatim: "\(threads.count) thread\(threads.count == 1 ? "" : "s")")
-                    .font(.callout).foregroundStyle(.secondary)
-                if unresolved > 0 {
-                    Text(verbatim: "\(unresolved) unresolved")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color.orange.opacity(0.25), in: Capsule())
-                }
-                Spacer()
-                Button {
+        return VStack(spacing: 0) {
+            PaneHeader {
+                Text("Threads").font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
+                Text(verbatim: "\(threads.count) conversation\(threads.count == 1 ? "" : "s")")
+                    .font(Typography.meta).foregroundStyle(Palette.textTertiary)
+                if unresolved > 0 { Tag("\(unresolved) open", tint: Palette.amber) }
+            } trailing: {
+            if model.isRefreshing {
+                ProgressView().controlSize(.small).scaleEffect(0.8).frame(width: 28, height: 28)
+            } else {
+                IconButton("arrow.clockwise", help: "Fetch new commits and reload comments (\u{2318}R)") {
                     Task { await model.refreshPR() }
-                } label: {
-                    if model.isRefreshing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise").foregroundStyle(.secondary)
-                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(model.isRefreshing)
-                .help("Fetch new commits and reload comments (⌘R)")
-                .accessibilityLabel("Refresh pull request")
             }
-            HStack(spacing: 10) {
-                Picker("Filter", selection: $filter) {
-                    ForEach(Filter.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 260)
-                HStack(spacing: 4) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.tertiary).imageScale(.small)
-                    TextField("Search comments, authors, files", text: $search)
-                        .textFieldStyle(.plain)
-                    if !search.isEmpty {
-                        Button {
-                            search = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Clear search")
-                    }
-                }
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
             }
+            HStack(spacing: Spacing.md) {
+                SegmentedControl(selection: $filter,
+                                 options: Filter.allCases.map { ($0, $0.rawValue) })
+                QuietField("Search comments, authors, files", text: $search)
+                    .frame(maxWidth: 360)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Spacing.lg)
+            .padding(.vertical, Spacing.sm)
+            .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
     }
 
     private func list(_ groups: [(path: String, threads: [CommentThread])]) -> some View {
@@ -187,21 +153,21 @@ struct PRCommentsView: View {
         let name = String(path.split(separator: "/").last ?? "")
         let dir = path.split(separator: "/").dropLast().joined(separator: "/")
         return HStack(spacing: 6) {
-            Image(systemName: "doc.text").imageScale(.small).foregroundStyle(.secondary)
+            Image(systemName: "doc.text").imageScale(.small).foregroundStyle(Palette.textSecondary)
             Text(name).font(Typography.fileName)
             if !dir.isEmpty {
-                Text(dir).font(Typography.path).foregroundStyle(.tertiary)
+                Text(dir).font(Typography.path).foregroundStyle(Palette.textTertiary)
                     .lineLimit(1).truncationMode(.middle)
             }
             Text(verbatim: "\(count)")
-                .font(.caption.monospacedDigit())
+                .font(Typography.metaDigits)
                 .padding(.horizontal, 5).padding(.vertical, 1)
-                .background(.quaternary, in: Capsule())
+                .background(Palette.surfaceRaised, in: Capsule())
             Spacer()
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
-        .background(.background.opacity(0.95))
+        .background(Palette.canvas)
     }
 
     /// Opens the thread's file in the diff and focuses its line.
@@ -220,61 +186,51 @@ struct CommentThreadCard: View {
     var onOpen: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                if let line = thread.line {
-                    Text(verbatim: "Line \(line)")
-                        .font(.caption.monospacedDigit())
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
-                } else {
-                    Label("Outdated", systemImage: "clock.arrow.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .help("The diff moved past this comment, so GitHub no longer anchors it to a line")
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            HStack(spacing: Spacing.sm) {
+                Button(action: onOpen) {
+                    HStack(spacing: Spacing.xs) {
+                        if let line = thread.line {
+                            Text(verbatim: "Line \(line)").font(Typography.metaDigits)
+                        } else {
+                            Label("Outdated", systemImage: "clock.arrow.circlepath")
+                                .font(Typography.meta)
+                        }
+                        Image(systemName: "arrow.up.right").font(.system(size: 8.5, weight: .bold))
+                    }
                 }
-                if thread.resolved {
-                    Label("Resolved", systemImage: "checkmark.seal.fill")
-                        .font(.caption).foregroundStyle(.green)
-                }
-                if thread.replies.count > 0 {
-                    Text(verbatim: "\(thread.replies.count) repl\(thread.replies.count == 1 ? "y" : "ies")")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    onOpen()
-                } label: {
-                    Label("Open in diff", systemImage: "arrow.right.circle")
-                        .font(.caption)
-                }
-                .buttonStyle(.link)
+                .buttonStyle(QuietButtonStyle())
                 // An outdated thread has no line to focus, but its file still
                 // opens — that is where the reader wants to land.
                 .help(thread.line == nil
-                      ? "Open this file in the diff (the comment has no current line)"
+                      ? "The diff moved past this comment, so GitHub no longer anchors it to a line. Opens the file."
                       : "Open this file in the diff at line \(thread.line!)")
+                Spacer()
             }
 
             if let hunk = thread.root.diffHunk, !hunk.isEmpty {
                 DiffHunkPreview(hunk: hunk)
             }
 
-            ForEach(thread.comments) { comment in
-                CommentCardView(
-                    comment: comment,
-                    onReply: { body in Task { await model.reply(to: comment, body: body) } },
-                    onResolve: { Task { await model.resolve(comment) } },
-                    onEdit: model.canEdit(comment)
-                        ? { body in Task { await model.edit(comment, body: body) } }
-                        : nil,
-                    indented: false)
-            }
+            ThreadCardView(
+                thread: thread,
+                onReply: { body in Task { await model.reply(to: thread.root, body: body) } },
+                onResolve: { Task { await model.resolve(thread.root) } },
+                onEdit: { comment in
+                    model.canEdit(comment)
+                        ? { body in Task { await model.edit(comment, body: body) } } : nil
+                },
+                fillsWidth: true)
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.cardBorder)
+        .contextMenu {
+            Button("Open in Diff", action: onOpen)
+            if thread.root.threadID != nil, !thread.resolved {
+                Button("Resolve Thread") { Task { await model.resolve(thread.root) } }
+            }
+            Divider()
+            Button("Copy Thread") {
+                AppModel.copy(thread.comments.map { "\($0.author): \($0.body)" }.joined(separator: "\n\n"))
+            }
         }
     }
 }
@@ -303,14 +259,15 @@ struct DiffHunkPreview: View {
             }
         }
         .padding(.vertical, 4)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: Radius.sm))
+        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: Radius.md))
+        .overlay { RoundedRectangle(cornerRadius: Radius.md).strokeBorder(Palette.hairline) }
     }
 
     private func color(for line: String) -> Color {
-        if line.hasPrefix("@@") { return .secondary }
-        if line.hasPrefix("+") { return Palette.added }
-        if line.hasPrefix("-") { return Palette.removed }
-        return .primary.opacity(0.8)
+        if line.hasPrefix("@@") { return Palette.textTertiary }
+        if line.hasPrefix("+") { return Palette.addedText }
+        if line.hasPrefix("-") { return Palette.removedText }
+        return Palette.text
     }
 
     private func background(for line: String) -> Color {
@@ -340,7 +297,7 @@ private struct VerdictList: View {
                             Text(review.label).font(Typography.meta).foregroundStyle(tint(review))
                             if let at = review.submittedAt {
                                 Text(Dates.age(iso: at))
-                                    .font(Typography.meta).foregroundStyle(.tertiary)
+                                    .font(Typography.meta).foregroundStyle(Palette.textTertiary)
                             }
                         }
                         if !review.body.isEmpty { MarkdownBodyView(text: review.body) }
@@ -362,6 +319,6 @@ private struct VerdictList: View {
     }
 
     private func tint(_ r: PullRequestReview) -> Color {
-        r.isApproval ? .green : r.isBlocking ? .red : .secondary
+        r.isApproval ? Palette.addedText : r.isBlocking ? Palette.removedText : Palette.textSecondary
     }
 }

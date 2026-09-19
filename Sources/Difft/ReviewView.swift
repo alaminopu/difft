@@ -50,7 +50,6 @@ struct ReviewView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             content
         }
         .confirmationDialog("Let Claude edit files to fix this?",
@@ -72,55 +71,49 @@ struct ReviewView: View {
     // MARK: - Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Spacing.sm) {
-            HStack(spacing: Spacing.sm) {
-                OverviewBackButton()
-                Divider().frame(height: 14)
-                Image(systemName: "checklist").foregroundStyle(Color.accentColor).imageScale(.small)
-                Text("Review").font(Typography.sectionTitle)
+        VStack(spacing: 0) {
+            PaneHeader {
+                Text("Findings").font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
                 if let stamp = session.data.reviewStamp {
                     Text(provenance(stamp))
-                        .font(Typography.meta).foregroundStyle(.tertiary).lineLimit(1)
+                        .font(Typography.meta).foregroundStyle(Palette.textTertiary).lineLimit(1)
                 }
-                Spacer(minLength: Spacing.sm)
+            } trailing: {
                 if isBusy {
-                    ProgressView().controlSize(.small)
+                    ProgressView().controlSize(.small).scaleEffect(0.8)
                     if let label = runningLabel {
-                        Text(label).font(.callout).foregroundStyle(.secondary)
+                        Text(label).font(Typography.control).foregroundStyle(Palette.textSecondary)
                     }
                     if let started = controller.runStartedAt { ElapsedLabel(start: started) }
-                    Button("Stop") { controller.cancel() }
-                        .buttonStyle(.plain).foregroundStyle(Color.accentColor).font(.callout)
+                    Button("Stop") { controller.cancel() }.buttonStyle(SecondaryButtonStyle())
                 } else if session.data.reviewStamp != nil {
                     Button {
                         Task { await model.review(force: true) }
                     } label: {
-                        Label("Re-run", systemImage: "arrow.clockwise")
-                            .labelStyle(.titleAndIcon).font(.callout)
+                        Label("Review again", systemImage: "arrow.clockwise")
                     }
-                    .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                    .buttonStyle(SecondaryButtonStyle())
                     .disabled(!session.agentState.canStart)
                     .help("Review again against the current head")
                 }
             }
             if !findings.isEmpty {
-                HStack(spacing: Spacing.sm) {
-                    Picker("Severity", selection: $severityFilter) {
-                        ForEach(SeverityFilter.allCases) { Text(label(for: $0)).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 320)
+                HStack(spacing: Spacing.md) {
+                    SegmentedControl(selection: $severityFilter,
+                                     options: SeverityFilter.allCases.map { ($0, label(for: $0)) })
                     Spacer()
                     let dismissed = findings.count { $0.dismissed }
                     if dismissed > 0 {
                         Toggle("Show \(dismissed) dismissed", isOn: $showDismissed)
                             .toggleStyle(.checkbox).font(Typography.meta)
+                            .foregroundStyle(Palette.textSecondary)
                     }
                 }
+                .padding(.horizontal, Spacing.lg)
+                .padding(.vertical, Spacing.sm)
+                .overlay(alignment: .bottom) { Rectangle().fill(Palette.hairline).frame(height: 1) }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 
     /// Counts live in the filter itself — a severity with nothing in it should
@@ -161,7 +154,7 @@ struct ReviewView: View {
             Text(controller.lastRunLabel == "Verifying"
                  ? "Checking each finding against the code, discarding what it cannot prove…"
                  : "Reading the changed files and their callers…")
-                .font(Typography.body).foregroundStyle(.secondary)
+                .font(Typography.body).foregroundStyle(Palette.textSecondary)
                 .multilineTextAlignment(.center)
             if !controller.toolActivity.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
@@ -169,8 +162,8 @@ struct ReviewView: View {
                         HStack(spacing: Spacing.xs) {
                             Text(call.name).font(.caption.bold())
                             if let detail = call.detail {
-                                Text(detail).font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
+                                Text(detail).font(Typography.identifier)
+                                    .foregroundStyle(Palette.textSecondary)
                                     .lineLimit(1).truncationMode(.middle)
                             }
                         }
@@ -209,7 +202,7 @@ struct ReviewView: View {
                 Label(session.data.reviewStamp == nil ? "Review this PR" : "Review again",
                       systemImage: "checklist")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(PrimaryButtonStyle())
             .disabled(!session.agentState.canStart)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -262,18 +255,18 @@ struct ReviewView: View {
         let name = String(path.split(separator: "/").last ?? Substring(path))
         let dir = path.split(separator: "/").dropLast().joined(separator: "/")
         return HStack(spacing: Spacing.xs) {
-            Image(systemName: "doc.text").imageScale(.small).foregroundStyle(.secondary)
+            Image(systemName: "doc.text").imageScale(.small).foregroundStyle(Palette.textSecondary)
             Text(name).font(Typography.fileName)
             if !dir.isEmpty {
-                Text(dir).font(Typography.path).foregroundStyle(.tertiary)
+                Text(dir).font(Typography.path).foregroundStyle(Palette.textTertiary)
                     .lineLimit(1).truncationMode(.head)
             }
-            Text("\(count)").font(Typography.badge).foregroundStyle(.tertiary)
+            Text("\(count)").font(Typography.badge).foregroundStyle(Palette.textTertiary)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, Spacing.xs)
+        .padding(.vertical, Spacing.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background.opacity(0.95))
+        .background(Palette.canvas)
     }
 
     private func open(_ f: Finding) {
@@ -298,9 +291,9 @@ private struct FindingCard: View {
                 SeverityChip(severity: finding.severity)
                 if !finding.category.isEmpty {
                     Text(finding.category)
-                        .font(Typography.badge).foregroundStyle(.secondary)
+                        .font(Typography.badge).foregroundStyle(Palette.textSecondary)
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(.quaternary.opacity(0.5), in: Capsule())
+                        .background(Palette.surfaceRaised, in: Capsule())
                 }
                 // Only the weaker verdict is worth a badge: everything here
                 // survived verification, so "confirmed" is the norm.
@@ -313,50 +306,44 @@ private struct FindingCard: View {
                 Spacer(minLength: Spacing.xs)
                 Button(action: onOpen) {
                     Text("\(String(finding.file.split(separator: "/").last ?? ""))" + ":\(finding.line)")
-                        .font(.caption.monospaced())
+                        .font(Typography.identifier)
                 }
-                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                .buttonStyle(.plain).foregroundStyle(Palette.accent)
                 .help("Open this line in the diff")
             }
             Text(finding.explanation)
-                .font(Typography.body).textSelection(.enabled)
+                .font(Typography.body).foregroundStyle(Palette.text)
+                .lineSpacing(Typography.bodyLineSpacing).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             if !finding.failureScenario.isEmpty {
                 HStack(alignment: .top, spacing: Spacing.xs) {
                     Image(systemName: "arrow.turn.down.right")
-                        .imageScale(.small).foregroundStyle(.tertiary)
+                        .imageScale(.small).foregroundStyle(Palette.textTertiary)
                     Text(finding.failureScenario)
-                        .font(Typography.meta).foregroundStyle(.secondary)
+                        .font(Typography.control).foregroundStyle(Palette.textSecondary)
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack(spacing: Spacing.md) {
                 Button("Fix it", action: onFix)
-                    .buttonStyle(.link).font(.caption).disabled(!canFix)
+                    .buttonStyle(QuietButtonStyle()).disabled(!canFix)
                     .help("Have Claude write a fix in the PR worktree")
                 Button(finding.dismissed ? "Restore" : "Dismiss", action: onDismiss)
-                    .buttonStyle(.link).font(.caption)
+                    .buttonStyle(QuietButtonStyle())
                 Spacer()
             }
         }
         .padding(Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .opacity(finding.dismissed ? 0.5 : 1)
-        .background(.quaternary.opacity(0.22), in: RoundedRectangle(cornerRadius: Radius.lg))
-        .overlay {
-            RoundedRectangle(cornerRadius: Radius.lg)
-                .strokeBorder(Palette.cardBorder)
-                .allowsHitTesting(false)
-        }
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(SeverityChip.color(for: finding.severity))
-                .frame(width: 3)
-                .padding(.vertical, Spacing.sm)
-                .allowsHitTesting(false)
-        }
+        .card()
         .contextMenu {
+            Button("Open in Diff", action: onOpen)
+            Button(finding.dismissed ? "Restore" : "Dismiss", action: onDismiss)
+            Button("Fix It\u{2026}", action: onFix).disabled(!canFix)
+            Divider()
             Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(
@@ -375,18 +362,18 @@ struct SeverityChip: View {
 
     static func color(for severity: String) -> Color {
         switch severity.lowercased() {
-        case "high": return Palette.removed
-        case "medium": return Palette.warning
-        default: return .secondary
+        case "high": return Palette.removedText
+        case "medium": return Palette.amber
+        default: return Palette.textSecondary
         }
     }
 
     var body: some View {
         Text(severity.uppercased())
-            .font(.caption2.bold())
+            .font(.system(size: 10.5, weight: .bold)).kerning(0.5)
             .foregroundStyle(Self.color(for: severity))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(Self.color(for: severity).opacity(0.18), in: Capsule())
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Self.color(for: severity).opacity(0.15), in: Capsule())
     }
 }
 
@@ -398,7 +385,7 @@ struct ElapsedLabel: View {
         TimelineView(.periodic(from: start, by: 1)) { context in
             Text(Self.format(context.date.timeIntervalSince(start)))
                 .font(Typography.metaDigits)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Palette.textTertiary)
         }
     }
 

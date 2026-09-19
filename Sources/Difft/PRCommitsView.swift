@@ -40,7 +40,6 @@ struct PRCommitsView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
             if model.commits.isEmpty {
                 ContentUnavailableView("No commits",
                                        systemImage: "arrow.triangle.branch",
@@ -59,49 +58,21 @@ struct PRCommitsView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            OverviewBackButton()
-            Divider().frame(height: 14)
-            Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
-            Text("Commits").font(Typography.sectionTitle)
+        PaneHeader {
+            Text("Commits").font(Typography.sectionTitle).foregroundStyle(Palette.textStrong)
             Text(verbatim: "\(model.commits.count)")
-                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.tertiary).imageScale(.small)
-                TextField("Search messages, authors, sha", text: $search)
-                    .textFieldStyle(.plain)
-                if !search.isEmpty {
-                    Button {
-                        search = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
+                .font(Typography.metaDigits).foregroundStyle(Palette.textTertiary)
+            QuietField("Search messages, authors, sha", text: $search)
+                .frame(maxWidth: 320)
+        } trailing: {
+            if model.isRefreshing {
+                ProgressView().controlSize(.small).scaleEffect(0.8).frame(width: 28, height: 28)
+            } else {
+                IconButton("arrow.clockwise", help: "Fetch new commits and reload comments (\u{2318}R)") {
+                    Task { await model.refreshPR() }
                 }
             }
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-            .frame(maxWidth: 320)
-            Spacer()
-            Button {
-                Task { await model.refreshPR() }
-            } label: {
-                if model.isRefreshing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise").foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(model.isRefreshing)
-            .help("Fetch new commits and reload comments (⌘R)")
-            .accessibilityLabel("Refresh pull request")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
     }
 
     private var list: some View {
@@ -124,25 +95,19 @@ struct PRCommitsView: View {
                                 if commit.sha != group.commits.last?.sha { Divider() }
                             }
                         }
-                        .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Palette.cardBorder)
-                        }
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.lg))
+                        .card()
                     } header: {
                         HStack(spacing: 6) {
-                            Image(systemName: "calendar").imageScale(.small)
-                                .foregroundStyle(.secondary)
                             Text(group.day).font(Typography.groupHeader)
+                                .foregroundStyle(Palette.textStrong)
                             Text(verbatim: "\(group.commits.count)")
-                                .font(.caption.monospacedDigit())
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(.quaternary, in: Capsule())
+                                .font(Typography.metaDigits).foregroundStyle(Palette.textTertiary)
                             Spacer()
                         }
                         .padding(.vertical, 6)
                         .padding(.horizontal, 4)
-                        .background(.background.opacity(0.95))
+                        .background(Palette.canvas)
                     }
                 }
             }
@@ -172,8 +137,8 @@ struct CommitRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(commit.subject)
-                    .font(.callout)
-                    .textSelection(.enabled)
+                    .font(Typography.body)
+                    .foregroundStyle(Palette.textStrong)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if commit.hasBody {
                     Button {
@@ -181,54 +146,65 @@ struct CommitRow: View {
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .imageScale(.small)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Palette.textSecondary)
                     }
                     .buttonStyle(.plain)
                     .help(isExpanded ? "Hide the full message" : "Show the full message")
                     .accessibilityLabel(isExpanded ? "Hide commit message body" : "Show commit message body")
                 }
                 Text(commit.shortSHA)
-                    .font(.caption.monospaced())
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
-                    .textSelection(.enabled)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(commit.sha, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc").imageScale(.small).foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Copy the full sha")
-                .accessibilityLabel("Copy commit sha")
+                    .font(Typography.identifier)
+                    .foregroundStyle(Palette.textSecondary)
             }
             HStack(spacing: 6) {
                 if !commit.author.isEmpty {
-                    Label(commit.author, systemImage: "person")
+                    AvatarDisc(login: commit.author, size: 16)
+                    Text(commit.author)
                 }
-                Text(age)
+                Text(age).foregroundStyle(Palette.textTertiary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            .font(Typography.meta)
+            .foregroundStyle(Palette.textSecondary)
 
             if isExpanded, commit.hasBody {
                 Text(commit.body.trimmingCharacters(in: .whitespacesAndNewlines))
-                    .font(.callout)
+                    .font(Typography.body)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 6))
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(hovering ? Color.accentColor.opacity(0.08) : .clear)
+        .background(hovering ? Palette.hover : .clear)
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .onHover { hovering = $0 }
         .help("Show the diff this commit introduced")
+        .contextMenu { CommitMenu(commit: commit, onOpen: onOpen) }
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens the diff this commit introduced")
+    }
+}
+
+/// Right-click on a commit, here and in its diff header.
+struct CommitMenu: View {
+    @EnvironmentObject var model: AppModel
+    let commit: Commit
+    var onOpen: (() -> Void)?
+
+    var body: some View {
+        if let onOpen { Button("Show Changes", action: onOpen) }
+        if let url = model.commitURL(commit.sha) {
+            Button("Open on GitHub") { NSWorkspace.shared.open(url) }
+        }
+        Divider()
+        Button("Copy SHA") { AppModel.copy(commit.sha) }
+        Button("Copy Short SHA") { AppModel.copy(commit.shortSHA) }
+        Button("Copy Message") {
+            AppModel.copy(commit.hasBody ? "\(commit.subject)\n\n\(commit.body)" : commit.subject)
+        }
     }
 }

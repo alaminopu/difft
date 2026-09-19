@@ -21,27 +21,37 @@ Difft is ad-hoc signed rather than notarized, so macOS quarantines it however yo
 
 **Requires** macOS 14+, [`gh`](https://cli.github.com) authenticated, and a local clone of the repo you want to review. Difft checks at launch and says what is missing.
 
-Point it at your clone with the folder button, and pick a PR.
+Open your clone from the home page (or drop the folder on the window), and pick a PR. Recent repositories stay on the home page and in the repository menu.
+
+![The repository's pull requests](docs/screenshots/pull-requests.png)
+
+A PR opens on its overview. The tabs across the top are the whole review: **Overview**, **Files**, **Threads**, **Findings**, **Commits**, **Walkthrough** (⌘1–⌘6), each showing what is waiting in it.
 
 ![The PR overview you land on](docs/screenshots/overview.png)
 
+## Finding your way around a big PR
+
+The sidebar is only files: a progress bar, a filter, and a tree whose folders say how many files are left in them and fold up once they are all viewed. The options button hides viewed files or flattens the tree. **⌘K** jumps to any file by a few letters of its name — `name:120` lands on a line — and **J**/**K** step through them in order. **V** marks the open file viewed and moves to the next one.
+
+On the right, the **review queue** lists what stands between you and submitting: open threads, findings nobody has dismissed, files not yet viewed — the ones in the file you are reading first. Each opens the line it is about. *Finish review* sits under it.
+
 ## Diff
 
-Pure SwiftUI, no web view. Side-by-side or unified, full-file context, word-level emphasis on what actually changed, and a rail for jumping between edits in long files. Click a line to select it, drag or shift-click for a range, right-click to copy, comment, or ask about it.
+Pure SwiftUI, no web view. Split or unified, full-file context with the unchanged runs folded away, word-level emphasis on what actually changed, and a rail for jumping between edits in long files (**N**/**P** step through them). Click a line to select it, drag or shift-click for a range, then **C** to comment, **A** to ask about it, or right-click for those plus copying the code or a `path:line` reference.
 
 ## Comments
 
 ![A review comment anchored to its line in the diff](docs/screenshots/inline-comment.png)
 
-Threads render under the line they belong to, markdown and code blocks intact. Reply, resolve, or edit your own; select lines and right-click to start a new one. Even a commit mentioned in passing — "fixed in d59f520cc" — opens its diff here rather than in a browser.
+A thread renders as one card under the line it belongs to, markdown and code blocks intact — and the HTML that review bots write (badges, `<details>` folds, `<code>`) is turned into readable text rather than shown as angle brackets. Resolved threads fold to a line. Reply, resolve, or edit your own; select lines and press **C** to start a new one. Even a commit mentioned in passing — "fixed in d59f520cc" — opens its diff here rather than in a browser.
 
-**⇧⌘C** lists every thread grouped by file, filtered by resolved state and searchable across bodies, authors and paths. Each shows the hunk it anchors to, and jumps to the line.
+The **Threads** tab (⇧⌘C) lists every thread grouped by file, filtered by resolved state and searchable across bodies, authors and paths. Each shows the hunk it anchors to, and jumps to the line.
 
 ![Every review thread on the PR, grouped by file](docs/screenshots/comments.png)
 
 ## Commits
 
-**⇧⌘K** lists commits newest first, grouped by day. Click one for the diff it introduced against its parent.
+The **Commits** tab (⇧⌘K) lists commits newest first, grouped by day. Click one for the diff it introduced against its parent.
 
 ![Commits grouped by the day they were authored](docs/screenshots/commits.png)
 
@@ -57,33 +67,49 @@ It separates the load-bearing changes from the mechanical bulk, marks whether th
 
 Findings are grouped by file, worst first, filterable by severity, and each one has to name the concrete inputs that produce the wrong result. They also appear inline in the diff, on the line they're about. Dismiss the ones you disagree with; the dismissal sticks.
 
-## Assistant
+## Your review
 
-A side panel running your local agent CLI inside a dedicated git worktree of the PR. **Chat** answers questions with read-only access to the code. **Findings** shows the score and opens the review pane.
+Notes are staged as you read and submitted together with a verdict from **Your review** (⇧⌘Y, or *Finish review* under the queue) — one notification for the author instead of one per note. A verdict can be submitted on its own, so approving a clean PR takes no comment.
 
-Chat and Findings run read-only. Asking one to fix a finding lets it edit files, but only inside that disposable worktree — never your checkout.
+## Ask
+
+The side panel's other face runs your local agent CLI inside a dedicated git worktree of the PR and answers questions with read-only access to the code. Select lines and press **A** to ask about them.
+
+Ask and the review run read-only. Asking one to fix a finding lets it edit files, but only inside that disposable worktree — never your checkout.
 
 ## Settings
 
-⌘, sets appearance, syntax colours, and the code font and size. The font is pushed into the highlighter rather than applied around it, so it reaches the highlighted code.
+⌘, has four tabs, each previewed on a real diff: **Appearance** (light, dark or system; syntax colours), **Diff** (code font, size, line spacing, split or unified), **Review** (whether marking a file viewed moves on, the queue, the file list, notifications) and **Shortcuts**.
+
+The code font defaults to JetBrains Mono without ligatures, bundled with the app — a review tool should show the characters that were typed, and a font that draws `!=` as one glyph does not. SF Mono and any installed monospaced font are a menu away. The font is pushed into the highlighter rather than applied around it, so it reaches the highlighted code.
+
+Right-click works throughout: pull requests, files and folders, threads, findings, commits, queue items, staged notes and diff lines all have the menu you would expect.
 
 ## Shortcuts
 
 | | |
 | --- | --- |
-| `⇧⌘C` `⇧⌘K` | Comments · Commits |
-| `⇧⌘E` `⇧⌘F` | Explain diff · Review findings |
-| `⌘0` `⌘R` | Overview · Refresh |
-| `⌥⌘0` | Assistant panel |
-| `⌘,` `⌘↩` | Settings · Post comment |
-| `j` `k` | Next · previous file |
+| `⌘1` – `⌘6` | Overview · Files · Threads · Findings · Commits · Walkthrough |
+| `⌘K` | Jump to a file, a line, or a tab |
+| `J` `K` · `N` `P` | Next, previous file · next, previous change |
+| `V` | Mark the file viewed and move on |
+| `C` · `A` | Comment on · ask about the selected lines |
+| `⇧⌘E` `⇧⌘F` | Run or open the walkthrough · the review |
+| `⇧⌘Y` `⌘↩` | Your review · add the comment to it |
+| `⌃⌘S` `⌥⌘0` | File list · review queue |
+| `⌘O` `⌘R` `⌘,` | Open repository · refresh · settings |
+
+Single-letter keys act on the diff, so click in it once first. The full list is behind **Keyboard shortcuts** in the status bar.
 
 ## Development
 
 ```sh
-swift test        # 170 tests, no network or CLI needed
+swift test        # 267 tests, no network or CLI needed
 swift run Difft   # dev build
 scripts/release.sh 0.2.0
+
+# A debug build can be driven straight to a screen, for checking a UI change:
+DIFFT_OPEN_PR=1135 DIFFT_OPEN_PATH=form/main.py DIFFT_OPEN_LINE=120 swift run Difft
 ```
 
 Four targets: `DifftCore` (diff model and parsing, pure logic), `DifftServices` (subprocesses, sessions, GitHub), `DifftUI` (the renderer), `Difft` (the app).
