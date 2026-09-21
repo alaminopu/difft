@@ -380,6 +380,38 @@ public final class GitHubService: Sendable {
     private let runner: ProcessRunning
     public init(runner: ProcessRunning = DefaultProcessRunner()) { self.runner = runner }
 
+    /// Runs a read-only `gh` command, giving it a second chance when `gh` dies
+    /// on its own corrupt response cache.
+    ///
+    /// That failure is sticky and badly disguised: every `gh pr list --search`
+    /// reads the same cached `SearchType` introspection, so one mangled file
+    /// breaks the author filter for the 24 hours the entry lives while the
+    /// unfiltered list — which never asks for it — keeps working, and all `gh`
+    /// says is a bare Go parse error that never mentions a cache. Difft points
+    /// `gh` at a cache of its own (`GHCache`), so throwing it away here costs
+    /// one refetch and touches nothing the user's shell relies on.
+    ///
+    /// Reads only. A POST whose response failed to parse may already have been
+    /// applied by GitHub, and replaying it would post the comment twice.
+    private func ghRead(_ arguments: [String], in repoDir: URL?) async throws -> ProcessResult {
+        let r = try await runner.run("gh", arguments: arguments, currentDirectory: repoDir)
+        guard r.exitCode != 0, Self.isCorruptCacheFailure(r.stderr) else { return r }
+        GHCache.clear()
+        return try await runner.run("gh", arguments: arguments, currentDirectory: repoDir)
+    }
+
+    /// Whether `gh` failed the way a mangled cache file makes it fail: Go's
+    /// own JSON decoder error, verbatim and unattributed —
+    ///
+    ///     invalid character '{' looking for beginning of object key string
+    ///
+    /// Nothing else `gh` reports reads like this. A query GitHub rejects comes
+    /// back as "GraphQL: ...", a network failure names the host, and a missing
+    /// repository says so.
+    static func isCorruptCacheFailure(_ stderr: String) -> Bool {
+        stderr.contains("invalid character") || stderr.contains("unexpected end of JSON input")
+    }
+
     /// Fields both the list and the single-PR lookup ask for, so the two
     /// cannot drift into returning differently-populated PullRequests.
     static let prFields = "number,title,body,headRefName,baseRefName,baseRefOid,headRefOid,author,state,isDraft,createdAt"
@@ -416,7 +448,7 @@ public final class GitHubService: Sendable {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         if !query.isEmpty { args += ["--search", query] }
-        let r = try await runner.run("gh", arguments: args, currentDirectory: repoDir)
+        let r = try await ghRead(args, in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         return try JSONDecoder().decode([RawPR].self, from: Data(r.stdout.utf8)).map(\.pullRequest)
     }
@@ -427,23 +459,22 @@ public final class GitHubService: Sendable {
     /// it has to work for a PR that was merged months ago and appears in no
     /// list the app would otherwise fetch.
     public func fetchPR(repoDir: URL, number: Int) async throws -> PullRequest {
-        let r = try await runner.run(
-            "gh", arguments: ["pr", "view", String(number), "--json", Self.prFields],
-            currentDirectory: repoDir)
+        let r = try await ghRead(["pr", "view", String(number), "--json", Self.prFields],
+                                 in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         return try JSONDecoder().decode(RawPR.self, from: Data(r.stdout.utf8)).pullRequest
     }
 
     public func fetchDiff(repoDir: URL, number: Int) async throws -> [FileDiff] {
-        let r = try await runner.run("gh", arguments: ["pr", "diff", String(number)], currentDirectory: repoDir)
+        let r = try await ghRead(["pr", "diff", String(number)], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         return DiffParser.parse(r.stdout)
     }
 
     public func fetchComments(repoDir: URL, number: Int) async throws -> [ReviewComment] {
-        let r = try await runner.run("gh", arguments: [
+        let r = try await ghRead([
             "api", "repos/{owner}/{repo}/pulls/\(number)/comments", "--paginate",
-        ], currentDirectory: repoDir)
+        ], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         struct Raw: Codable {
             struct User: Codable { let login: String }
@@ -461,9 +492,9 @@ public final class GitHubService: Sendable {
 
 
     public func fetchCommits(repoDir: URL, number: Int) async throws -> [Commit] {
-        let r = try await runner.run("gh", arguments: [
+        let r = try await ghRead([
             "pr", "view", String(number), "--json", "commits",
-        ], currentDirectory: repoDir)
+        ], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         struct Raw: Codable {
             struct Wrapper: Codable { let commits: [C] }
@@ -490,7 +521,8 @@ public final class GitHubService: Sendable {
     /// a second, and it cannot change while a repo is open, so callers are
     /// expected to fetch it once and hold it.
     public func nameWithOwner(repoDir: URL) async throws -> String {
-        let who = try await runner.run("gh", arguments: ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], currentDirectory: repoDir)
+        let who = try await ghRead(["repo", "view", "--json", "nameWithOwner",
+                                    "--jq", ".nameWithOwner"], in: repoDir)
         guard who.exitCode == 0 else { throw GitHubServiceError.commandFailed(who.stderr) }
         return who.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -504,10 +536,10 @@ public final class GitHubService: Sendable {
         let query = """
         query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}}}}}}
         """
-        let r = try await runner.run("gh", arguments: [
+        let r = try await ghRead([
             "api", "graphql", "-f", "query=\(query)",
             "-f", "owner=\(parts[0])", "-f", "name=\(parts[1])", "-F", "number=\(number)",
-        ], currentDirectory: repoDir)
+        ], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         struct Resp: Codable {
             struct D: Codable { let repository: Repo }
@@ -548,9 +580,9 @@ public final class GitHubService: Sendable {
     @discardableResult
     /// Submitted reviews, oldest first.
     public func fetchReviews(repoDir: URL, number: Int) async throws -> [PullRequestReview] {
-        let r = try await runner.run("gh", arguments: [
+        let r = try await ghRead([
             "api", "repos/{owner}/{repo}/pulls/\(number)/reviews?per_page=100", "--paginate",
-        ], currentDirectory: repoDir)
+        ], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         struct Raw: Codable {
             struct User: Codable { let login: String? }
@@ -619,8 +651,7 @@ public final class GitHubService: Sendable {
     /// The signed-in login, so the UI can tell which comments are the user's
     /// own and therefore editable.
     public func currentUser(repoDir: URL) async throws -> String {
-        let r = try await runner.run("gh", arguments: ["api", "user", "--jq", ".login"],
-                                     currentDirectory: repoDir)
+        let r = try await ghRead(["api", "user", "--jq", ".login"], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -689,10 +720,10 @@ public final class GitHubService: Sendable {
     /// picker wants anyway. Capped rather than paginated to exhaustion — past
     /// a few hundred the list is a search box, not a list.
     public func fetchContributors(repoDir: URL, limit: Int = 500) async throws -> [String] {
-        let r = try await runner.run("gh", arguments: [
+        let r = try await ghRead([
             "api", "repos/{owner}/{repo}/contributors?per_page=100",
             "--paginate", "--jq", ".[].login",
-        ], currentDirectory: repoDir)
+        ], in: repoDir)
         guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         var seen = Set<String>()
         var logins: [String] = []

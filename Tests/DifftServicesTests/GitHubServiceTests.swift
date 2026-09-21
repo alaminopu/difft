@@ -499,4 +499,74 @@ extension GitHubServiceTests {
         XCTAssertEqual(ReviewTally.of([]), ReviewTally())
     }
 
+    // MARK: - gh's corrupt response cache
+
+    /// The stderr `gh` prints when its own cached `SearchType` introspection
+    /// is mangled. It never mentions the cache, and it sank the author filter
+    /// for a full day: `gh pr list --search` reads that entry, the unfiltered
+    /// list does not, so filtering by author errored while the list beside it
+    /// worked.
+    private static let corruptCacheStderr =
+        "invalid character '{' looking for beginning of object key string\n"
+
+    func testACorruptGhCacheIsThrownAwayAndTheReadRetried() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: "", stderr: Self.corruptCacheStderr, exitCode: 1),
+            ProcessResult(stdout: """
+            [{"number": 7, "title": "Fix", "body": "", "headRefName": "fix", "author": {"login": "malamind0"}}]
+            """, stderr: "", exitCode: 0),
+        ]
+        let svc = GitHubService(runner: fake)
+        let prs = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"),
+                                        search: "author:malamind0")
+        XCTAssertEqual(prs.map(\.number), [7])
+        // Same query both times: the cache was the problem, not the command.
+        XCTAssertEqual(fake.calls.count, 2)
+        XCTAssertEqual(fake.calls[0].arguments, fake.calls[1].arguments)
+        XCTAssertEqual(fake.calls[1].arguments.last, "author:malamind0")
+    }
+
+    /// A retry is only ever worth it for this one failure. Anything else —
+    /// a rejected query, a network error — fails the same way twice and the
+    /// second attempt just doubles the wait.
+    func testAnOrdinaryGhFailureIsNotRetried() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "", stderr: "GraphQL: Field 'x' doesn't exist",
+                                        exitCode: 1)]
+        let svc = GitHubService(runner: fake)
+        do {
+            _ = try await svc.listPRs(repoDir: URL(fileURLWithPath: "/tmp/repo"))
+            XCTFail("expected the gh failure to propagate")
+        } catch {
+            XCTAssertEqual(fake.calls.count, 1)
+        }
+    }
+
+    /// GitHub may well have applied a POST whose *response* failed to parse,
+    /// so replaying it would post the comment twice. Only reads are replayed.
+    func testAFailedWriteIsNeverReplayed() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [ProcessResult(stdout: "", stderr: Self.corruptCacheStderr, exitCode: 1)]
+        let svc = GitHubService(runner: fake)
+        do {
+            _ = try await svc.createComment(repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 1,
+                                            commitID: "abc", path: "a.swift", line: 2,
+                                            startLine: nil, body: "note")
+            XCTFail("expected the gh failure to propagate")
+        } catch {
+            XCTAssertEqual(fake.calls.count, 1)
+        }
+    }
+
+    func testCorruptCacheIsToldApartFromOtherFailures() {
+        XCTAssertTrue(GitHubService.isCorruptCacheFailure(Self.corruptCacheStderr))
+        XCTAssertTrue(GitHubService.isCorruptCacheFailure("unexpected end of JSON input"))
+        XCTAssertFalse(GitHubService.isCorruptCacheFailure(""))
+        XCTAssertFalse(GitHubService.isCorruptCacheFailure(
+            "GraphQL: Could not resolve to a Repository with the name 'x/y'."))
+        XCTAssertFalse(GitHubService.isCorruptCacheFailure(
+            "error connecting to api.github.com"))
+    }
+
 }

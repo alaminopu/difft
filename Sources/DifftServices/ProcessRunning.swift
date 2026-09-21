@@ -28,10 +28,44 @@ public extension ProcessRunning {
     }
 }
 
+/// Where `gh` keeps its HTTP response cache when Difft is the one running it.
+///
+/// `gh` stores a handful of responses on disk, among them the `SearchType`
+/// introspection it looks up before every `gh pr list --search`. The files are
+/// plain HTTP dumps rewritten in place, so one left mangled — by an
+/// interrupted write, or by two `gh` processes writing it at once, and Difft
+/// runs several at a time — poisons every later search for the 24 hours the
+/// entry lives:
+///
+///     invalid character '{' looking for beginning of object key string
+///
+/// and nothing in that sentence says a cache was involved. Pointing `gh` at a
+/// directory of Difft's own makes the cache something Difft may throw away on
+/// sight, without touching what the user's own `gh` has cached in the shell.
+public enum GHCache {
+    /// `gh` appends its own "gh" component below this.
+    public static let home: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return base.appendingPathComponent(Bundle.main.bundleIdentifier ?? "Difft",
+                                           isDirectory: true)
+    }()
+
+    static var directory: URL { home.appendingPathComponent("gh", isDirectory: true) }
+
+    /// Drops the cache. The next `gh` refills it from GitHub.
+    public static func clear() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 /// GUI apps launched from Finder inherit LaunchServices' minimal PATH, which
 /// misses Homebrew — where `gh` and `claude` usually live. Every subprocess
 /// gets this widened environment.
-public func difftProcessEnvironment() -> [String: String] {
+///
+/// `executable` only decides whether the `gh` cache redirect applies; the
+/// widened PATH is the same for all of them.
+public func difftProcessEnvironment(for executable: String = "") -> [String: String] {
     var env = ProcessInfo.processInfo.environment
     let extras = ["/opt/homebrew/bin", "/usr/local/bin",
                   "\(NSHomeDirectory())/.local/bin"]
@@ -40,6 +74,11 @@ public func difftProcessEnvironment() -> [String: String] {
         path += ":" + extra
     }
     env["PATH"] = path
+    // Only `gh` reads this, and only for its response cache — its credentials
+    // and config live under XDG_CONFIG_HOME, which is left alone.
+    if executable == "gh" || executable.hasSuffix("/gh") {
+        env["XDG_CACHE_HOME"] = GHCache.home.path
+    }
     return env
 }
 
@@ -58,7 +97,7 @@ public final class DefaultProcessRunner: ProcessRunning {
             p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             p.arguments = [executable] + arguments
             p.currentDirectoryURL = currentDirectory
-            p.environment = difftProcessEnvironment()
+            p.environment = difftProcessEnvironment(for: executable)
             let out = Pipe(), err = Pipe()
             p.standardOutput = out; p.standardError = err
             let input = stdin.map { _ in Pipe() }
