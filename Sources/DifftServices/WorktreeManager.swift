@@ -19,33 +19,135 @@ public enum WorktreeError: Error, Equatable, LocalizedError {
     }
 }
 
+/// Checks pull requests out where the user's own repository never sees them.
+///
+/// Worktrees used to hang off the user's clone, so every PR opened left a
+/// `difft-pr-N` branch and a worktree entry in their repository — in
+/// `git branch`, in `git worktree list`, in their IDE. Each repository now
+/// gets a bare clone of Difft's own under `reposDir`, made from the local
+/// clone with hardlinked objects so it costs seconds and next to no disk, and
+/// the PR worktrees belong to that.
 public final class WorktreeManager: Sendable {
     private let runner: ProcessRunning
     private let baseDir: URL
-    public init(runner: ProcessRunning, baseDir: URL) {
+    private let reposDir: URL
+    /// - Parameter reposDir: where the private clones live. Defaults to a
+    ///   `repos` directory beside `baseDir`, outside it so the worktree
+    ///   sweep in `prune(olderThan:)` never mistakes one for a checkout.
+    public init(runner: ProcessRunning, baseDir: URL, reposDir: URL? = nil) {
         self.runner = runner; self.baseDir = baseDir
+        self.reposDir = reposDir ?? baseDir.deletingLastPathComponent().appendingPathComponent("repos")
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: self.reposDir, withIntermediateDirectories: true)
     }
 
     public func worktreeURL(repoName: String, prNumber: Int) -> URL {
         baseDir.appendingPathComponent("\(repoName)-pr\(prNumber)")
     }
 
+    public func repoURL(repoName: String) -> URL {
+        reposDir.appendingPathComponent("\(repoName).git")
+    }
+
     public func ensureWorktree(cloneDir: URL, repoName: String, prNumber: Int,
                                remote: String = "origin") async throws -> URL {
+        let repo = try await ensureRepo(cloneDir: cloneDir, repoName: repoName, remote: remote)
         let target = worktreeURL(repoName: repoName, prNumber: prNumber)
         if FileManager.default.fileExists(atPath: target.path) {
-            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
-            return target
+            if Self.isOrphaned(target) {
+                // Its repository was swept away beneath it; git can do
+                // nothing in it, so start over.
+                try? FileManager.default.removeItem(at: target)
+            } else {
+                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
+                return target
+            }
         }
         let branch = "difft-pr-\(prNumber)"
-        let prune = try await runner.run("git", arguments: ["worktree", "prune"], currentDirectory: cloneDir)
+        let prune = try await runner.run("git", arguments: ["worktree", "prune"], currentDirectory: repo)
         guard prune.exitCode == 0 else { throw WorktreeError.commandFailed(prune.stderr) }
-        let fetch = try await runner.run("git", arguments: ["fetch", remote, "+pull/\(prNumber)/head:\(branch)"], currentDirectory: cloneDir)
+        let fetch = try await runner.run("git", arguments: ["fetch", remote, "+pull/\(prNumber)/head:\(branch)"], currentDirectory: repo)
         guard fetch.exitCode == 0 else { throw WorktreeError.commandFailed(fetch.stderr) }
-        let add = try await runner.run("git", arguments: ["worktree", "add", target.path, branch], currentDirectory: cloneDir)
+        let add = try await runner.run("git", arguments: ["worktree", "add", target.path, branch], currentDirectory: repo)
         guard add.exitCode == 0 else { throw WorktreeError.commandFailed(add.stderr) }
         return target
+    }
+
+    /// Difft's private clone of `cloneDir`, made on first use.
+    ///
+    /// It is bare, points `remote` at the same URL the user's clone does, and
+    /// starts with a copy of the user's remote-tracking branches so the base
+    /// branch resolves without a fetch.
+    private func ensureRepo(cloneDir: URL, repoName: String, remote: String) async throws -> URL {
+        let fm = FileManager.default
+        let repo = repoURL(repoName: repoName)
+        if fm.fileExists(atPath: repo.path) {
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: repo.path)
+            return repo
+        }
+
+        let url = try await git(["remote", "get-url", remote], in: cloneDir)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Built under a temporary name and moved into place, so a clone cut
+        // short is never taken for a finished one.
+        let partial = reposDir.appendingPathComponent(".\(repoName)-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: partial) }
+        // A local path clones by hardlinking the object files.
+        _ = try await git(["clone", "--bare", "--quiet", cloneDir.path, partial.path], in: reposDir)
+        _ = try await git(["remote", "remove", "origin"], in: partial)
+        _ = try await git(["remote", "add", remote, url], in: partial)
+        _ = try await git(["fetch", "--quiet", "--no-tags", cloneDir.path,
+                           "+refs/remotes/\(remote)/*:refs/remotes/\(remote)/*"], in: partial)
+        do {
+            try fm.moveItem(at: partial, to: repo)
+        } catch where fm.fileExists(atPath: repo.path) {
+            // Another caller finished the same clone first.
+            return repo
+        }
+        await removeLegacyCheckouts(from: cloneDir)
+        return repo
+    }
+
+    /// Takes back what earlier versions left in the user's repository: the
+    /// worktrees under `baseDir` and the `difft-pr-*` branches they sat on.
+    ///
+    /// Best effort, once per repository. A worktree with uncommitted edits
+    /// holds an applied fix the user was told to review, so it stays until
+    /// the age sweep removes it, and so does the branch it has checked out
+    /// (git refuses to delete that one).
+    private func removeLegacyCheckouts(from cloneDir: URL) async {
+        let base = baseDir.resolvingSymlinksInPath().path + "/"
+        if let list = try? await git(["worktree", "list", "--porcelain"], in: cloneDir) {
+            let paths = list.split(separator: "\n")
+                .filter { $0.hasPrefix("worktree ") }
+                .map { String($0.dropFirst("worktree ".count)) }
+                .filter { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path.hasPrefix(base) }
+            for path in paths where !((try? await isDirty(URL(fileURLWithPath: path))) ?? true) {
+                _ = try? await git(["worktree", "remove", "--force", path], in: cloneDir)
+            }
+        }
+        _ = try? await git(["worktree", "prune"], in: cloneDir)
+        if let branches = try? await git(["for-each-ref", "--format=%(refname:short)",
+                                          "refs/heads/difft-pr-*"], in: cloneDir) {
+            for branch in branches.split(separator: "\n") {
+                _ = try? await git(["branch", "-D", String(branch)], in: cloneDir)
+            }
+        }
+    }
+
+    /// A worktree's `.git` is a file naming its entry in the repository it
+    /// came from. When that entry is gone, so is the checkout.
+    private static func isOrphaned(_ worktree: URL) -> Bool {
+        guard let pointer = try? String(contentsOf: worktree.appendingPathComponent(".git"), encoding: .utf8),
+              pointer.hasPrefix("gitdir: ") else { return false }
+        let gitdir = pointer.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return !FileManager.default.fileExists(atPath: gitdir)
+    }
+
+    private func git(_ arguments: [String], in dir: URL) async throws -> String {
+        let r = try await runner.run("git", arguments: arguments, currentDirectory: dir)
+        guard r.exitCode == 0 else { throw WorktreeError.commandFailed(r.stderr) }
+        return r.stdout
     }
 
     /// Re-fetches the PR head into an existing worktree and hard-resets to
@@ -101,15 +203,19 @@ public final class WorktreeManager: Sendable {
         return !r.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Deletes checkouts untouched for `days`, returning how many went.
+    /// Deletes checkouts and private clones untouched for `days`, returning
+    /// how many went.
     ///
     /// Background housekeeping only, run once at launch. A checkout the app is
-    /// using is touched on every open, so the age test alone keeps it.
+    /// using is touched on every open, and so is its repository's clone, so
+    /// the age test alone keeps both.
     @discardableResult
     public func prune(olderThan days: Int) throws -> Int {
         let fm = FileManager.default
         let cutoff = Date().addingTimeInterval(-Double(days) * 86400)
-        let contents = (try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let contents = [baseDir, reposDir].flatMap {
+            (try? fm.contentsOfDirectory(at: $0, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        }
         var removed = 0
         for url in contents {
             let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
