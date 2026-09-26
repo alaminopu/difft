@@ -90,6 +90,9 @@ public struct FileDiffView: View {
     /// Line range a new comment is being written against, nil when not
     /// composing.
     @State private var composing: CommentTarget?
+    /// Whether the last build changed which rows exist (another file or
+    /// layout), as opposed to only the threads and findings on them.
+    @State private var reshaped = true
     /// A short explanation for an action that could not proceed, shown at the
     /// top of the diff and dismissed by the reader or the next file.
     @State private var notice: String?
@@ -102,14 +105,16 @@ public struct FileDiffView: View {
     /// is the whole file, on every scroll tick.
     @State private var shownItems: [DiffItem] = []
 
-    public var onReplyComment: (ReviewComment, String) -> Void = { _, _ in }
+    /// Resolves to whether GitHub took the reply.
+    public var onReplyComment: (ReviewComment, String) async -> Bool = { _, _ in false }
     public var onResolveComment: (ReviewComment) -> Void = { _ in }
     /// nil for a comment that is not the signed-in user's.
-    public var onEditComment: ((ReviewComment) -> ((String) -> Void)?)?
+    public var onEditComment: ((ReviewComment) -> ((String) async -> Bool)?)?
     /// (path, startLine, endLine, body). nil disables commenting entirely,
     /// which is what a single-commit diff wants — its line numbers are not
     /// the ones GitHub anchors PR comments to.
-    public var onAddComment: ((Int, Int, String) -> Void)?
+    /// Resolves to why posting failed, nil once posted.
+    public var onAddComment: ((Int, Int, String) async -> String?)?
     /// Stage into the pending review rather than posting.
     public var onStageComment: ((Int, Int, String) -> Void)?
     /// Notes already staged, so the composer can say what this one joins.
@@ -122,10 +127,10 @@ public struct FileDiffView: View {
                 comments: [ReviewComment] = [], findings: [Finding] = [],
                 command: Binding<DiffCommand?> = .constant(nil),
                 onFocused: @escaping () -> Void = {}, onAsk: @escaping (String, String) -> Void,
-                onReplyComment: @escaping (ReviewComment, String) -> Void = { _, _ in },
+                onReplyComment: @escaping (ReviewComment, String) async -> Bool = { _, _ in false },
                 onResolveComment: @escaping (ReviewComment) -> Void = { _ in },
-                onEditComment: ((ReviewComment) -> ((String) -> Void)?)? = nil,
-                onAddComment: ((Int, Int, String) -> Void)? = nil,
+                onEditComment: ((ReviewComment) -> ((String) async -> Bool)?)? = nil,
+                onAddComment: ((Int, Int, String) async -> String?)? = nil,
                 onStageComment: ((Int, Int, String) -> Void)? = nil,
                 onDismissFinding: ((Finding) -> Void)? = nil,
                 stagedCount: Int = 0) {
@@ -203,11 +208,16 @@ public struct FileDiffView: View {
         }
         // LEFT comments match old line numbers, RIGHT (the default) match new
         // ones. Outdated comments with no line are skipped.
+        //
+        // A thread is identified by its root comment, not by build order: with
+        // sequential ids, posting one thread shifted every later one, and a
+        // half-typed reply or an opened resolved thread moved to whichever
+        // card inherited its id. Negated, so it cannot meet the counter's ids.
         for thread in CommentThread.group(comments) {
             guard let line = thread.root.line else { continue }
             guard let rowID = (thread.root.side == "LEFT" ? rowByOldLine[line] : rowByNewLine[line])
             else { continue }
-            attachments[rowID, default: []].append(DiffItem(id: next(), kind: .thread(thread)))
+            attachments[rowID, default: []].append(DiffItem(id: -thread.root.id, kind: .thread(thread)))
         }
         if !attachments.isEmpty {
             var merged: [DiffItem] = []
@@ -275,14 +285,20 @@ public struct FileDiffView: View {
                      digits: DiffMetrics.digits(for: file.maxLineNumber), key: key)
     }
 
-    /// Keyed on comment identity and state, not just count: resolving a
-    /// comment changes `resolved` without changing the count, and the stale
-    /// card used to stay on screen.
+    /// Keyed on comment identity, state and text, not just count: resolving a
+    /// comment changes `resolved` without changing the count, and an edit
+    /// changes only the body, and in both cases the stale card stayed on
+    /// screen until the next refresh.
     private var buildKey: String {
-        let commentKey = comments.map { "\($0.id):\($0.resolved)" }.joined(separator: ",")
+        let commentKey = comments.map { "\($0.id):\($0.resolved):\($0.body.hashValue)" }
+            .joined(separator: ",")
         let findingKey = findings.map { "\($0.id):\($0.dismissed)" }.joined(separator: ",")
-        return "\(file.path)|\(layout)|\(commentKey)|\(findingKey)"
+        return "\(shapeKey)|\(commentKey)|\(findingKey)"
     }
+
+    /// The part of `buildKey` that decides which rows exist. A build that
+    /// keeps it only moved threads or findings around.
+    private var shapeKey: String { "\(file.path)|\(layout)" }
 
     /// Diff geometry for this file: the gutter is sized from the widest line
     /// number it actually has to show, at the current font size.
@@ -325,7 +341,7 @@ public struct FileDiffView: View {
                                                       onDismiss: onDismissFinding.map { dismiss in { dismiss(f) } })
                                 case .thread(let thread):
                                     ThreadCardView(thread: thread,
-                                                   onReply: { body in onReplyComment(thread.root, body) },
+                                                   onReply: { body in await onReplyComment(thread.root, body) },
                                                    onResolve: { onResolveComment(thread.root) },
                                                    onEdit: { onEditComment?($0) })
                                         .padding(.vertical, Spacing.sm)
@@ -415,10 +431,19 @@ public struct FileDiffView: View {
                     // against an empty row set and silently did nothing. Apply
                     // it whenever the built rows (or the target) change.
                     .onChange(of: built.key, initial: true) { _, _ in
+                        rowFrames.reset()
+                        // Only threads or findings changed. Every reply,
+                        // resolve and edit used to land here and was treated
+                        // as a new file: the opened folds shut and the view
+                        // jumped back to the first change, away from the
+                        // conversation the reader was in.
+                        guard reshaped else {
+                            respliceItems()
+                            return
+                        }
                         // Another file, or another layout: the recorded row
                         // frames describe rows that no longer exist, and the
                         // bands the reader opened were in the previous file.
-                        rowFrames.reset()
                         notice = nil
                         expandedRegions = []
                         shownItems = built.items
@@ -459,8 +484,12 @@ public struct FileDiffView: View {
                         composing = nil
                     },
                     onSend: { body in
-                        onAddComment?(target.startLine, target.endLine, body)
-                        composing = nil
+                        // Closed only once GitHub has it: a refused comment
+                        // used to vanish with the sheet, text and all.
+                        guard let onAddComment else { return nil }
+                        let failure = await onAddComment(target.startLine, target.endLine, body)
+                        if failure == nil { composing = nil }
+                        return failure
                     },
                     onCancel: { composing = nil },
                     stagedCount: stagedCount)
@@ -470,10 +499,23 @@ public struct FileDiffView: View {
                 // in; body evaluations stay cheap in the meantime.
                 let f = file, side = layout == .sideBySide, cs = comments, fs = findings, key = buildKey
                 guard built.key != key else { return }
-                built = await Task.detached(priority: .userInitiated) {
+                let fresh = await Task.detached(priority: .userInitiated) {
                     Self.build(file: f, sideBySide: side, comments: cs, findings: fs, key: key)
                 }.value
-                if focusLine != nil { /* focus re-applied by focusIfNeeded below via onAppear path */ }
+                if !built.key.isEmpty, built.key.hasPrefix(shapeKey + "|") {
+                    // Same rows, so their ids carry over, but a new thread
+                    // pins its row and re-cuts the folds around it. Reopen
+                    // whichever new folds hold rows the reader had opened.
+                    let opened = expandedRegions.flatMap { built.hidden[$0] ?? [] }.compactMap { item -> Int? in
+                        if case .row(let r) = item.kind { return r.id }
+                        return nil
+                    }
+                    expandedRegions = Set(opened.compactMap { fresh.regionOfRow[$0] })
+                    reshaped = false
+                } else {
+                    reshaped = true
+                }
+                built = fresh
             }
             .overlay {
                 if built.key.isEmpty {
@@ -940,17 +982,19 @@ public struct CommentCardView: View {
     var onReply: (String) -> Void = { _ in }
     var onResolve: () -> Void = {}
     /// nil when the comment is not the signed-in user's, which is what hides
-    /// the Edit action rather than showing one that would fail.
-    var onEdit: ((String) -> Void)?
+    /// the Edit action rather than showing one that would fail. Resolves to
+    /// whether GitHub took the change.
+    var onEdit: ((String) async -> Bool)?
     /// Kept for source compatibility; the thread card owns layout now.
     var indented: Bool = true
     @State private var editing = false
     @State private var editText = ""
+    @State private var saving = false
 
     public init(comment: ReviewComment,
                 onReply: @escaping (String) -> Void = { _ in },
                 onResolve: @escaping () -> Void = {},
-                onEdit: ((String) -> Void)? = nil,
+                onEdit: ((String) async -> Bool)? = nil,
                 indented: Bool = true) {
         self.comment = comment
         self.onReply = onReply
@@ -982,13 +1026,15 @@ public struct CommentCardView: View {
                     VStack(alignment: .trailing, spacing: Spacing.sm) {
                         ComposerEditor(text: $editText, minHeight: 68)
                         HStack(spacing: Spacing.sm) {
+                            if saving { ProgressView().controlSize(.small) }
                             Button("Cancel") { editing = false }
                                 .buttonStyle(SecondaryButtonStyle())
-                            Button("Save") { submitEdit() }
+                                .disabled(saving)
+                            Button(saving ? "Saving\u{2026}" : "Save") { submitEdit() }
                                 .buttonStyle(PrimaryButtonStyle())
                                 .keyboardShortcut(.return, modifiers: .command)
                                 .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                          || editText == comment.body)
+                                          || editText == comment.body || saving)
                         }
                     }
                 } else {
@@ -1014,11 +1060,17 @@ public struct CommentCardView: View {
         }
     }
 
+    /// Leaves the editor open until GitHub has the change: closing it at once
+    /// threw the rewrite away whenever the save failed.
     private func submitEdit() {
         let text = editText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        onEdit?(text)
-        editing = false
+        guard !text.isEmpty, !saving, let onEdit else { return }
+        saving = true
+        Task {
+            let saved = await onEdit(text)
+            saving = false
+            if saved { editing = false }
+        }
     }
 }
 
@@ -1048,21 +1100,25 @@ public struct ComposerEditor: View {
 /// one reply field, one Resolve.
 public struct ThreadCardView: View {
     let thread: CommentThread
-    var onReply: (String) -> Void
+    /// Resolves to whether the reply was posted.
+    var onReply: (String) async -> Bool
     var onResolve: () -> Void
     /// The edit handler for a given comment, or nil when it is not the user's.
-    var onEdit: (ReviewComment) -> ((String) -> Void)?
+    var onEdit: (ReviewComment) -> ((String) async -> Bool)?
     /// Fills its container (the Threads pane) rather than sitting at reading
     /// width under a line of code.
     var fillsWidth = false
     @State private var replyText = ""
+    /// Posting takes a second or so; without this the field emptied at once
+    /// and nothing said the reply was on its way until it popped in.
+    @State private var sending = false
     @State private var expandedResolved = false
     @FocusState private var replying: Bool
 
     public init(thread: CommentThread,
-                onReply: @escaping (String) -> Void,
+                onReply: @escaping (String) async -> Bool,
                 onResolve: @escaping () -> Void,
-                onEdit: @escaping (ReviewComment) -> ((String) -> Void)? = { _ in nil },
+                onEdit: @escaping (ReviewComment) -> ((String) async -> Bool)? = { _ in nil },
                 fillsWidth: Bool = false) {
         self.thread = thread
         self.onReply = onReply
@@ -1119,12 +1175,16 @@ public struct ThreadCardView: View {
                 .font(Typography.body)
                 .lineLimit(1...6)
                 .focused($replying)
+                .disabled(sending)
                 .onSubmit { submitReply() }
                 .padding(.horizontal, Spacing.sm + 2)
                 .padding(.vertical, 6)
                 .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 7))
                 .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.cardBorder) }
-            if !replyText.trimmingCharacters(in: .whitespaces).isEmpty {
+            if sending {
+                ProgressView().controlSize(.small)
+                Text("Sending\u{2026}").font(Typography.meta).foregroundStyle(Palette.textTertiary)
+            } else if !replyText.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button("Send") { submitReply() }.buttonStyle(PrimaryButtonStyle())
             } else if thread.root.threadID != nil, !thread.resolved {
                 Button("Resolve") { onResolve() }.buttonStyle(SecondaryButtonStyle())
@@ -1136,12 +1196,20 @@ public struct ThreadCardView: View {
         .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
     }
 
+    /// Keeps the text until GitHub has it, so a failed reply can be sent
+    /// again instead of retyped.
     private func submitReply() {
         let text = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        onReply(text)
-        replyText = ""
-        replying = false
+        guard !text.isEmpty, !sending else { return }
+        sending = true
+        Task {
+            let posted = await onReply(text)
+            sending = false
+            if posted {
+                replyText = ""
+                replying = false
+            }
+        }
     }
 }
 
@@ -1404,13 +1472,16 @@ struct NewCommentSheet: View {
     let target: CommentTarget
     /// Staged into the pending review.
     var onStage: (String) -> Void
-    /// Posted on its own, the way a one-line "typo here" should be.
-    var onSend: (String) -> Void
+    /// Posted on its own, the way a one-line "typo here" should be. Resolves
+    /// to why it failed, nil once posted.
+    var onSend: (String) async -> String?
     var onCancel: () -> Void
     /// How many notes are already waiting, so the primary action can say what
     /// it is joining.
     var stagedCount: Int = 0
     @State private var body_ = ""
+    @State private var posting = false
+    @State private var failure: String?
 
     private var trimmed: String { body_.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -1434,6 +1505,12 @@ struct NewCommentSheet: View {
                 Spacer()
             }
             ComposerEditor(text: $body_, minHeight: 130)
+            if let failure {
+                Text(failure)
+                    .font(Typography.meta).foregroundStyle(Palette.removed)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack(spacing: Spacing.sm) {
                 // The most common failure is picking a line GitHub does not
                 // consider part of the diff, so say where it will land.
@@ -1445,19 +1522,31 @@ struct NewCommentSheet: View {
                     .keyboardShortcut(.cancelAction)
                 // Posting on its own is still right for a one-line "typo
                 // here"; everything else belongs in the review.
-                Button("Post now") { onSend(trimmed) }
+                if posting { ProgressView().controlSize(.small) }
+                Button(posting ? "Posting\u{2026}" : "Post now") { post() }
                     .buttonStyle(SecondaryButtonStyle())
-                    .disabled(trimmed.isEmpty)
+                    .disabled(trimmed.isEmpty || posting)
                 Button(stagedCount == 0 ? "Add to review" : "Add to review (\(stagedCount + 1))") {
                     onStage(trimmed)
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(trimmed.isEmpty)
+                .disabled(trimmed.isEmpty || posting)
             }
         }
         .padding(Spacing.lg)
         .frame(width: 540)
         .background(Palette.floating)
+    }
+
+    private func post() {
+        let text = trimmed
+        guard !text.isEmpty, !posting else { return }
+        posting = true
+        failure = nil
+        Task {
+            failure = await onSend(text)
+            posting = false
+        }
     }
 }

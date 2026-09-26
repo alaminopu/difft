@@ -329,18 +329,18 @@ struct FileDiffContainer: View {
                          command: $command,
                          onFocused: { session.selectedLines = nil },
                          onAsk: onAsk,
-                         onReplyComment: { c, body in Task { await model.reply(to: c, body: body) } },
+                         onReplyComment: { c, body in await model.reply(to: c, body: body) },
                          onResolveComment: { c in Task { await model.resolve(c) } },
                          onEditComment: { c in
                              // No handler means no Edit button, which is how
                              // someone else's comment shows no action that
                              // would only fail.
                              guard model.canEdit(c) else { return nil }
-                             return { body in Task { await model.edit(c, body: body) } }
+                             return { body in await model.edit(c, body: body) }
                          },
                          onAddComment: { start, end, body in
-                             Task { await model.addComment(path: file.path, startLine: start,
-                                                           endLine: end, body: body) }
+                             await model.addComment(path: file.path, startLine: start,
+                                                    endLine: end, body: body)
                          },
                          onStageComment: { start, end, body in
                              model.stageComment(path: file.path, startLine: start,
@@ -353,16 +353,29 @@ struct FileDiffContainer: View {
                 .onChange(of: file.path) { selection = nil }
                 .focusable()
                 .focusEffectDisabled()  // no blue focus ring around the diff
-                .onKeyPress("j") { model.stepFile(1); return .handled }
-                .onKeyPress("k") { model.stepFile(-1); return .handled }
-                .onKeyPress("v") { model.toggleViewedAndAdvance(); return .handled }
-                .onKeyPress("n") { command = DiffCommand(.nextChange); return .handled }
-                .onKeyPress("p") { command = DiffCommand(.previousChange); return .handled }
-                .onKeyPress("c") { command = DiffCommand(.comment); return .handled }
-                .onKeyPress("a") { command = DiffCommand(.ask); return .handled }
+                .onKeyPress("j") { shortcut { model.stepFile(1) } }
+                .onKeyPress("k") { shortcut { model.stepFile(-1) } }
+                .onKeyPress("v") { shortcut { model.toggleViewedAndAdvance() } }
+                .onKeyPress("n") { shortcut { command = DiffCommand(.nextChange) } }
+                .onKeyPress("p") { shortcut { command = DiffCommand(.previousChange) } }
+                .onKeyPress("c") { shortcut { command = DiffCommand(.comment) } }
+                .onKeyPress("a") { shortcut { command = DiffCommand(.ask) } }
         } else {
             PROverviewView(session: session)
         }
+    }
+
+    /// Runs a single-letter diff shortcut unless the reader is typing.
+    ///
+    /// The reply and edit fields of a thread live inside the diff, and
+    /// `onKeyPress` on an ancestor sees their keystrokes before they do: typing
+    /// "can you check" into a reply opened the comment composer, asked Claude,
+    /// jumped to the next change and switched files, and the letters never
+    /// reached the field. A text view as first responder means the key is text.
+    private func shortcut(_ action: () -> Void) -> KeyPress.Result {
+        if NSApp.keyWindow?.firstResponder is NSText { return .ignored }
+        action()
+        return .handled
     }
 }
 

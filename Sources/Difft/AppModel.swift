@@ -828,8 +828,11 @@ final class AppModel: ObservableObject {
         comments = updated
     }
 
-    func edit(_ comment: ReviewComment, body: String) async {
-        guard let repoDir, let session else { return }
+    /// True once GitHub has the change, so the editor can stay open with the
+    /// text when it does not.
+    @discardableResult
+    func edit(_ comment: ReviewComment, body: String) async -> Bool {
+        guard let repoDir, let session else { return false }
         do {
             let updated = try await github.updateComment(
                 repoDir: repoDir, commentID: comment.id, body: body)
@@ -847,8 +850,10 @@ final class AppModel: ObservableObject {
                 comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
             }
             errorBanner = nil
+            return true
         } catch {
             errorBanner = "Failed to edit comment: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -869,11 +874,14 @@ final class AppModel: ObservableObject {
     /// numbers do not belong to that commit's diff — so this uses the head
     /// the worktree is actually checked out at, which is what the line
     /// numbers on screen were read from.
-    func addComment(path: String, startLine: Int, endLine: Int, body: String) async {
-        guard let repoDir, let session else { return }
+    ///
+    /// Returns why it failed, nil once posted, so the composer can stay open
+    /// with the text instead of closing on a comment GitHub refused.
+    @discardableResult
+    func addComment(path: String, startLine: Int, endLine: Int, body: String) async -> String? {
+        guard let repoDir, let session else { return "No pull request is open." }
         guard let head = currentHead, !head.isEmpty else {
-            errorBanner = "Cannot comment yet: still resolving the PR's head commit."
-            return
+            return "Cannot comment yet: still resolving the PR's head commit."
         }
         do {
             let created = try await github.createComment(
@@ -889,10 +897,9 @@ final class AppModel: ObservableObject {
                 comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
             }
             errorBanner = nil
+            return nil
         } catch {
-            // The usual cause is commenting on a line outside the diff, which
-            // GitHub refuses; say so rather than showing a bare API error.
-            errorBanner = "Failed to add comment: \(error.localizedDescription)"
+            return "Failed to add comment: \(error.localizedDescription)"
         }
     }
 
@@ -974,8 +981,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func reply(to comment: ReviewComment, body: String) async {
-        guard let repoDir, let session else { return }
+    /// True once GitHub has the reply, so the field can keep the text when
+    /// it does not.
+    @discardableResult
+    func reply(to comment: ReviewComment, body: String) async -> Bool {
+        guard let repoDir, let session else { return false }
         do {
             let posted = try await github.replyToComment(
                 repoDir: repoDir, number: session.data.pr.number,
@@ -990,8 +1000,10 @@ final class AppModel: ObservableObject {
                 comments = await loadComments(repoDir: repoDir, number: session.data.pr.number)
             }
             errorBanner = nil
+            return true
         } catch {
             errorBanner = "Failed to reply: \(error.localizedDescription)"
+            return false
         }
     }
 

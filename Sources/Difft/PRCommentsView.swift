@@ -214,11 +214,11 @@ struct CommentThreadCard: View {
 
             ThreadCardView(
                 thread: thread,
-                onReply: { body in Task { await model.reply(to: thread.root, body: body) } },
+                onReply: { body in await model.reply(to: thread.root, body: body) },
                 onResolve: { Task { await model.resolve(thread.root) } },
                 onEdit: { comment in
                     model.canEdit(comment)
-                        ? { body in Task { await model.edit(comment, body: body) } } : nil
+                        ? { body in await model.edit(comment, body: body) } : nil
                 },
                 fillsWidth: true)
         }
