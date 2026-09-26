@@ -74,7 +74,7 @@ public final class DefaultStreamingProcessRunner: StreamingProcessRunning, @unch
                     errHandle.readabilityHandler = nil
 
                     if proc.terminationStatus != 0 && proc.terminationReason == .exit {
-                        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                        let stderr = String(decoding: stderrData, as: UTF8.self)
                         cont.finish(throwing: NSError(domain: "Difft.agent", code: Int(proc.terminationStatus),
                                                       userInfo: [NSLocalizedDescriptionKey: "claude exited \(proc.terminationStatus)" + (stderr.isEmpty ? "" : "\n\(stderr)")]))
                     } else {

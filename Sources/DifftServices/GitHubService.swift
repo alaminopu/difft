@@ -529,34 +529,49 @@ public final class GitHubService: Sendable {
 
     /// Maps each comment's databaseId to its review thread (GraphQL id +
     /// resolved flag) so the UI can offer resolve and show state.
+    ///
+    /// Paged: GitHub serves at most 100 threads a request, and this used to
+    /// ask once. On a busier PR every thread past the hundredth had no id —
+    /// so no Resolve — and counted as open whether it was or not.
     public func fetchThreadInfo(repoDir: URL, number: Int,
                                 nameWithOwner: String) async throws -> [Int: (threadID: String, resolved: Bool)] {
         let parts = nameWithOwner.split(separator: "/")
         guard parts.count == 2 else { throw GitHubServiceError.commandFailed("bad nameWithOwner") }
         let query = """
-        query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}}}}}}
+        query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:100){nodes{databaseId}}}}}}}
         """
-        let r = try await ghRead([
-            "api", "graphql", "-f", "query=\(query)",
-            "-f", "owner=\(parts[0])", "-f", "name=\(parts[1])", "-F", "number=\(number)",
-        ], in: repoDir)
-        guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
         struct Resp: Codable {
             struct D: Codable { let repository: Repo }
             struct Repo: Codable { let pullRequest: PR }
             struct PR: Codable { let reviewThreads: Threads }
-            struct Threads: Codable { let nodes: [Thread] }
+            struct Threads: Codable { let pageInfo: PageInfo?; let nodes: [Thread] }
+            struct PageInfo: Codable { let hasNextPage: Bool; let endCursor: String? }
             struct Thread: Codable { let id: String; let isResolved: Bool; let comments: Comments }
             struct Comments: Codable { let nodes: [C] }
             struct C: Codable { let databaseId: Int? }
             let data: D
         }
-        let resp = try JSONDecoder().decode(Resp.self, from: Data(r.stdout.utf8))
         var map: [Int: (String, Bool)] = [:]
-        for thread in resp.data.repository.pullRequest.reviewThreads.nodes {
-            for c in thread.comments.nodes {
-                if let dbid = c.databaseId { map[dbid] = (thread.id, thread.isResolved) }
+        var cursor: String?
+        // Bounded, so a cursor that never advances cannot spin forever.
+        for _ in 0..<50 {
+            var args = [
+                "api", "graphql", "-f", "query=\(query)",
+                "-f", "owner=\(parts[0])", "-f", "name=\(parts[1])", "-F", "number=\(number)",
+            ]
+            if let cursor { args += ["-f", "after=\(cursor)"] }
+            let r = try await ghRead(args, in: repoDir)
+            guard r.exitCode == 0 else { throw GitHubServiceError.commandFailed(r.stderr) }
+            let threads = try JSONDecoder().decode(Resp.self, from: Data(r.stdout.utf8))
+                .data.repository.pullRequest.reviewThreads
+            for thread in threads.nodes {
+                for c in thread.comments.nodes {
+                    if let dbid = c.databaseId { map[dbid] = (thread.id, thread.isResolved) }
+                }
             }
+            guard let page = threads.pageInfo, page.hasNextPage, let next = page.endCursor,
+                  next != cursor else { break }
+            cursor = next
         }
         return map
     }

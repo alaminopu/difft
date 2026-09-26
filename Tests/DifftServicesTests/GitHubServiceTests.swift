@@ -18,6 +18,34 @@ final class FakeProcessRunner: ProcessRunning, @unchecked Sendable {
 }
 
 final class GitHubServiceTests: XCTestCase {
+    /// GitHub serves 100 threads a request; a PR with more used to lose the
+    /// state of every thread past the first page.
+    func testThreadInfoFollowsEveryPage() async throws {
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{
+              "pageInfo":{"hasNextPage":true,"endCursor":"c1"},
+              "nodes":[{"id":"T1","isResolved":false,"comments":{"nodes":[{"databaseId":1}]}}]}}}}}
+            """, stderr: "", exitCode: 0),
+            ProcessResult(stdout: """
+            {"data":{"repository":{"pullRequest":{"reviewThreads":{
+              "pageInfo":{"hasNextPage":false,"endCursor":"c2"},
+              "nodes":[{"id":"T2","isResolved":true,"comments":{"nodes":[{"databaseId":2},{"databaseId":3}]}}]}}}}}
+            """, stderr: "", exitCode: 0),
+        ]
+        let info = try await GitHubService(runner: fake).fetchThreadInfo(
+            repoDir: URL(fileURLWithPath: "/tmp/repo"), number: 5, nameWithOwner: "o/r")
+
+        XCTAssertEqual(info[1]?.threadID, "T1")
+        XCTAssertEqual(info[1]?.resolved, false)
+        XCTAssertEqual(info[3]?.threadID, "T2")
+        XCTAssertEqual(info[3]?.resolved, true)
+        XCTAssertEqual(fake.calls.count, 2)
+        XCTAssertFalse(fake.calls[0].arguments.contains { $0.hasPrefix("after=") })
+        XCTAssertTrue(fake.calls[1].arguments.contains("after=c1"))
+    }
+
     func testListPRsParsesGhJSON() async throws {
         let fake = FakeProcessRunner()
         fake.responses = [ProcessResult(stdout: """

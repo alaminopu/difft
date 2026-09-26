@@ -142,8 +142,12 @@ public final class DefaultProcessRunner: ProcessRunning {
                     outHandle.readabilityHandler = nil
                     errHandle.readabilityHandler = nil
 
-                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                    let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                    // Lenient: one byte that is not UTF-8 — a Latin-1 source
+                    // file in a diff — made the strict decoder return nil,
+                    // and the whole PR came back as no files and no error.
+                    // Such bytes now read as U+FFFD and nothing else is lost.
+                    let stdout = String(decoding: stdoutData, as: UTF8.self)
+                    let stderr = String(decoding: stderrData, as: UTF8.self)
                     cont.resume(returning: ProcessResult(stdout: stdout, stderr: stderr, exitCode: proc.terminationStatus))
                 }
             }

@@ -111,6 +111,11 @@ final class AgentController: ObservableObject {
                                      fileCount: self.model.files.count), in: wt) {
                 self.consume(event, accumulatingResult: &found)
             }
+            // Stop ends the process cleanly, so the loop above just finishes
+            // and the partial narration parsed as "no findings" — which then
+            // replaced the saved review, dismissals and all, and called the
+            // PR clean. A cancelled or failed pass writes nothing.
+            guard self.stillRunning(session) else { return }
             let candidates = FindingsParser.parse(found.isEmpty ? self.streamingText : found)
             let head = try? await self.model.processRunner.run(
                 "git", arguments: ["rev-parse", "HEAD"], currentDirectory: wt)
@@ -131,7 +136,16 @@ final class AgentController: ObservableObject {
                     AgentTask.verifyFindings(pr: session.data.pr, candidates: candidates), in: wt) {
                 self.consume(event, accumulatingResult: &checked)
             }
-            let survivors = FindingsParser.parseVerified(checked.isEmpty ? self.streamingText : checked)
+            guard self.stillRunning(session) else { return }
+            guard let survivors = FindingsParser.verifiedIfReadable(
+                    checked.isEmpty ? self.streamingText : checked) else {
+                // An answer that is not the expected JSON rejected nothing;
+                // treating it as "all rejected" silently emptied the review.
+                session.agentState = .failed(
+                    "The verification pass returned an answer Difft could not read. "
+                    + "The previous findings were kept.")
+                return
+            }
             session.data.findings = survivors.sorted {
                 $0.severityRank == $1.severityRank ? $0.file < $1.file : $0.severityRank < $1.severityRank
             }
@@ -197,6 +211,14 @@ final class AgentController: ObservableObject {
         }
     }
 
+
+    /// Whether the run is still one whose results should be kept: not
+    /// cancelled, and not already failed by an error result.
+    private func stillRunning(_ session: ReviewSession) -> Bool {
+        guard !userCancelled else { return false }
+        if case .running = session.agentState { return true }
+        return false
+    }
 
     func cancel() {
         userCancelled = true

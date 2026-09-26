@@ -676,8 +676,13 @@ final class AppModel: ObservableObject {
             // Show the PR as soon as its diff exists. Waiting for the `gh`
             // round-trips first left the window unchanged for well over a
             // second after the click, with the diff already in hand.
-            let data = sessionStore.load(repo: repoName, prNumber: pr.number)
+            var data = sessionStore.load(repo: repoName, prNumber: pr.number)
                 ?? SessionData(pr: pr, repoDir: repoDir.path, viewedFiles: [], chat: [], findings: [])
+            // The saved session carries the PR as it was on its first open,
+            // and nothing replaced it: a retitled PR kept its old title, a
+            // merged one still said open, and Claude was briefed from the
+            // stale description. The list row just clicked is current.
+            data.pr = pr
             session = ReviewSession(data: data)
             lastOpenedFile = nil
             // Land on the PR overview; the user picks a file from the tree.
@@ -1077,15 +1082,22 @@ final class AppModel: ObservableObject {
     /// reloads comments — keeping viewed files, chat, and findings intact.
     func refreshPR() async {
         guard let repoDir, let session, !isRefreshing else { return }
-        let pr = session.data.pr
         isRefreshing = true
         defer { isRefreshing = false }
+        let number = session.data.pr.number
         do {
             let previousHead = currentHead
             worktreeNote = nil
-            async let commentsTask = loadComments(repoDir: repoDir, number: pr.number)
-            async let commitsTask = loadCommits(repoDir: repoDir, number: pr.number)
-            async let reviewsTask = loadReviews(repoDir: repoDir, number: pr.number)
+            async let commentsTask = loadComments(repoDir: repoDir, number: number)
+            async let commitsTask = loadCommits(repoDir: repoDir, number: number)
+            async let reviewsTask = loadReviews(repoDir: repoDir, number: number)
+            // The PR itself too, not only its code: its title, state and base
+            // can all change, and the diff below is taken against that base.
+            let pr = (try? await github.fetchPR(repoDir: repoDir, number: number)) ?? session.data.pr
+            if pr != session.data.pr {
+                session.data.pr = pr
+                saveSession()
+            }
             // Re-fetching the head is part of building the full-context diff,
             // so refreshing is the same work as opening — doing it here too
             // fetched the same ref twice.
@@ -1110,7 +1122,7 @@ final class AppModel: ObservableObject {
                 : "Updated to \(String((head ?? "").prefix(7)))"
             errorBanner = nil
         } catch {
-            errorBanner = "Failed to refresh PR #\(pr.number): \(error.localizedDescription)"
+            errorBanner = "Failed to refresh PR #\(number): \(error.localizedDescription)"
         }
     }
 

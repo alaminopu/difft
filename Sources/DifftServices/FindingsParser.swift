@@ -15,6 +15,13 @@ public enum FindingsParser {
     /// each earned. Anything the verifier did not return is discarded, which
     /// is the point of running it.
     public static func parseVerified(_ finalText: String) -> [Finding] {
+        verifiedIfReadable(finalText) ?? []
+    }
+
+    /// The survivors, or nil when the verifier's answer is not the expected
+    /// JSON at all. The two must not look alike: "every finding rejected"
+    /// clears the review, "could not read the answer" must leave it alone.
+    public static func verifiedIfReadable(_ finalText: String) -> [Finding]? {
         struct Verified: Decodable {
             let verdict: String?
             let finding: Finding
@@ -27,7 +34,7 @@ public enum FindingsParser {
         }
         guard let data = JSONBlock.extract(from: finalText).data(using: .utf8),
               let rows = try? JSONDecoder().decode([Verified].self, from: data) else {
-            return []
+            return nil
         }
         return rows.compactMap { row -> Finding? in
             let verdict = (row.verdict ?? "").lowercased()
