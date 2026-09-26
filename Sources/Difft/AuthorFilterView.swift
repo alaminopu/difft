@@ -99,6 +99,14 @@ struct AuthorPicker: View {
             TextField("Find a person", text: $filter)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
+                // Return did nothing, so a login typed in full still had to be
+                // clicked. It takes the first match, or the login as typed.
+                .onSubmit {
+                    guard let pick = matches.first(where: { !model.prAuthors.contains($0) }) ?? literal
+                    else { return }
+                    toggle(pick)
+                    filter = ""
+                }
             if model.isLoadingAuthors {
                 ProgressView().controlSize(.small).scaleEffect(0.55).frame(width: 14, height: 14)
             } else if !filter.isEmpty {

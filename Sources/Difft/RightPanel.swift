@@ -61,6 +61,7 @@ struct ChatTab: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Spacing.md) {
                 if session.data.chat.isEmpty {
@@ -90,14 +91,20 @@ struct ChatTab: View {
                 // Explaining answer into their own panes, and their narration
                 // showing here read as the explanation being posted to chat.
                 if case .running = session.agentState,
-                   ChatTab.streamsHere(controller.lastRunLabel),
-                   !controller.streamingText.isEmpty {
-                    Text(controller.streamingText)
-                        .font(Typography.body).foregroundStyle(Palette.textSecondary)
-                        .lineSpacing(Typography.bodyLineSpacing)
+                   ChatTab.streamsHere(controller.lastRunLabel) {
+                    StreamingBubble(stream: controller.stream) {
+                        proxy.scrollTo(Self.bottom, anchor: .bottom)
+                    }
                 }
+                Color.clear.frame(height: 1).id(Self.bottom)
             }
             .padding(Spacing.lg)
+        }
+        // New answers landed below the fold and nothing moved to show them.
+        .onChange(of: session.data.chat.count) {
+            proxy.scrollTo(Self.bottom, anchor: .bottom)
+        }
+        .onAppear { proxy.scrollTo(Self.bottom, anchor: .bottom) }
         }
         AgentRunBar(session: session)
         VStack(alignment: .leading, spacing: Spacing.sm) {
@@ -138,6 +145,8 @@ struct ChatTab: View {
         .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
     }
 
+    private static let bottom = "chat-bottom"
+
     private func submit() {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         // onSubmit (Return) has no disabled state like the Ask button —
@@ -146,6 +155,23 @@ struct ChatTab: View {
         let sel = pendingAsk
         question = ""; pendingAsk = nil
         Task { await controller.ask(question: q, selection: sel) }
+    }
+}
+
+/// The answer as it streams in. Its own view observing only the stream, so a
+/// token redraws this text and nothing else.
+private struct StreamingBubble: View {
+    @ObservedObject var stream: StreamBuffer
+    /// Keeps the growing answer in view.
+    let onGrow: () -> Void
+
+    var body: some View {
+        if !stream.text.isEmpty {
+            Text(stream.text)
+                .font(Typography.body).foregroundStyle(Palette.textSecondary)
+                .lineSpacing(Typography.bodyLineSpacing)
+                .onChange(of: stream.text.count) { onGrow() }
+        }
     }
 }
 

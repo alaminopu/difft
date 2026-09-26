@@ -18,8 +18,40 @@ public final class HighlightService: ObservableObject {
     private var fontSize: CGFloat = 12
     private var theme: SyntaxTheme = .atomOne
 
+    /// Bumped whenever the palette or font changes, and part of every cache
+    /// key: a warm-up still running for the old look can then only fill
+    /// entries nobody asks for, never serve stale colours.
+    private var generation = 0
+
+    /// Highlights a file's lines ahead of the rows that show them.
+    ///
+    /// A row highlighted itself when first drawn: a JavaScriptCore call and
+    /// an HTML scan per line, on the main thread, so scrolling into fresh
+    /// code stuttered while each line went through it. The warmer does the
+    /// same per-line work on a queue of its own, with its own Highlightr, into
+    /// the same cache — so rows find their colours ready, and look exactly as
+    /// they would have.
+    private let warmer = HighlightWarmer()
+
     public init() {
         cache.countLimit = 20_000
+    }
+
+    /// Starts highlighting `lines` in the background, in the order given,
+    /// replacing any warm-up still running for another file.
+    public func prewarm(_ lines: [String], language: String?) {
+        guard let language, isDark != nil else { return }
+        let prefix = "\(generation)\u{1}\(language)\u{1}"
+        var seen = Set<String>()
+        let pending = lines.filter {
+            $0.count <= Self.maxHighlightedLength
+                && seen.insert($0).inserted
+                && cache.object(forKey: (prefix + $0) as NSString) == nil
+        }
+        warmer.start(lines: pending, language: language, keyPrefix: prefix,
+                     themeName: theme.themeName(dark: isDark ?? true),
+                     font: CodeFont.resolve(family: fontFamily, size: fontSize),
+                     cache: cache)
     }
 
     /// Driven by the root view's resolved appearance.
@@ -79,8 +111,9 @@ public final class HighlightService: ObservableObject {
         // Must follow setTheme: it builds a fresh Theme whose init resets the
         // code font to Courier 14.
         highlightr?.theme.setCodeFont(CodeFont.resolve(family: fontFamily, size: fontSize))
-        // The cache key covers language and text only, so every entry is stale
-        // once the palette or font changes.
+        // Every entry is stale once the palette or font changes.
+        generation += 1
+        warmer.cancel()
         cache.removeAllObjects()
         objectWillChange.send()
     }
@@ -129,12 +162,14 @@ public final class HighlightService: ObservableObject {
     /// whose fence rarely names the language).
     public func highlightedAuto(_ text: String) -> AttributedString {
         guard text.count <= Self.maxHighlightedLength else { return plain(text) }
-        return cached(key: "\u{1}auto\u{1}\(text)", text: text) { $0.highlight(text) }
+        return cached(key: "\(generation)\u{1}\u{1}auto\u{1}\(text)", text: text) { $0.highlight(text) }
     }
 
     public func highlighted(_ text: String, language: String?) -> AttributedString {
         guard let language, text.count <= Self.maxHighlightedLength else { return plain(text) }
-        return cached(key: "\(language)\u{1}\(text)", text: text) { $0.highlight(text, as: language) }
+        return cached(key: "\(generation)\u{1}\(language)\u{1}\(text)", text: text) {
+            $0.highlight(text, as: language)
+        }
     }
 
     /// A line no highlighter handled still has to match the chosen font —
@@ -158,8 +193,60 @@ public final class HighlightService: ObservableObject {
     }
 }
 
-/// NSCache needs a class; AttributedString is a value type.
-private final class CachedRun {
+/// NSCache needs a class; AttributedString is a value type. Written from the
+/// warmer's queue and read on the main thread; it never changes after init.
+private final class CachedRun: @unchecked Sendable {
     let value: AttributedString
     init(_ value: AttributedString) { self.value = value }
+}
+
+/// The background half of `HighlightService.prewarm`.
+///
+/// One serial queue and one Highlightr, touched only from that queue: a
+/// JavaScriptCore context must not be used from two threads at once, and the
+/// main thread's Highlightr is the service's own.
+private final class HighlightWarmer: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "difft.highlight.warm", qos: .utility)
+    private var highlightr: Highlightr?          // queue only
+    private var appliedTheme: (name: String, font: NSFont)?  // queue only
+    private let lock = NSLock()
+    private var token = 0                         // under lock
+
+    private func current(_ t: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return token == t
+    }
+
+    func cancel() {
+        lock.lock(); token += 1; lock.unlock()
+    }
+
+    func start(lines: [String], language: String, keyPrefix: String,
+               themeName: String, font: NSFont, cache: NSCache<NSString, CachedRun>) {
+        lock.lock(); token += 1; let mine = token; lock.unlock()
+        guard !lines.isEmpty else { return }
+        nonisolated(unsafe) let cache = cache
+        nonisolated(unsafe) let font = font
+        queue.async { [self] in
+            guard current(mine) else { return }
+            if highlightr == nil { highlightr = Highlightr() }
+            guard let highlightr else { return }
+            if appliedTheme?.name != themeName || appliedTheme?.font != font {
+                // The same two steps, in the same order, as the service's own
+                // applyTheme, so the colours match.
+                highlightr.setTheme(to: themeName)
+                highlightr.theme.setCodeFont(font)
+                appliedTheme = (themeName, font)
+            }
+            for line in lines {
+                // Checked per line: opening another file, or changing the
+                // theme, abandons the rest at once.
+                guard current(mine) else { return }
+                let key = (keyPrefix + line) as NSString
+                guard cache.object(forKey: key) == nil,
+                      let result = highlightr.highlight(line, as: language) else { continue }
+                cache.setObject(CachedRun(AttributedString(result)), forKey: key)
+            }
+        }
+    }
 }

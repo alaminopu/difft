@@ -2,9 +2,24 @@ import SwiftUI
 import DifftCore
 import DifftServices
 
+/// The text a run is streaming, in an object of its own.
+///
+/// As a published property of the controller, every token re-rendered every
+/// view observing the controller — the Walkthrough and Findings panes too,
+/// which never read it, and a long walkthrough redrawn dozens of times a
+/// second while being regenerated. Only the chat's live bubble watches this.
+@MainActor
+final class StreamBuffer: ObservableObject {
+    @Published var text = ""
+}
+
 @MainActor
 final class AgentController: ObservableObject {
-    @Published var streamingText = ""
+    let stream = StreamBuffer()
+    var streamingText: String {
+        get { stream.text }
+        set { stream.text = newValue }
+    }
     struct ToolCall: Identifiable, Equatable {
         let id = UUID()
         let name: String
@@ -31,8 +46,17 @@ final class AgentController: ObservableObject {
 
     init(model: AppModel) { self.model = model }
 
+    /// One run at a time across sessions. Run state lives on the session, so
+    /// closing a PR mid-run and reopening it gave a fresh, idle session that
+    /// would start a second run beside the first — sharing this controller's
+    /// stream text, with Stop reaching only one of them.
+    private var isRunning = false
+
     private func withWorktree(_ label: String, _ body: (URL) async throws -> Void) async {
-        guard let session = model.session, session.agentState.canStart, let repoDir = model.repoDir else { return }
+        guard !isRunning, let session = model.session, session.agentState.canStart,
+              let repoDir = model.repoDir else { return }
+        isRunning = true
+        defer { isRunning = false }
         userCancelled = false
         session.agentState = .running(label)
         streamingText = ""; toolActivity = []
@@ -62,6 +86,10 @@ final class AgentController: ObservableObject {
                 outcome: Self.outcome(of: session.agentState, label: label))
         }
         runStartedAt = nil
+        // A session closed mid-run has been read back from disk by now if the
+        // PR was reopened, and edited there. Saving this orphaned copy would
+        // put back the file as it was when the run began.
+        guard model.session === session else { return }
         model.sessionStore.saveInBackground(session.data) { [weak model] error in
             model?.errorBanner = "Failed to save session: \(error.localizedDescription)"
         }
@@ -218,6 +246,13 @@ final class AgentController: ObservableObject {
         guard !userCancelled else { return false }
         if case .running = session.agentState { return true }
         return false
+    }
+
+    /// Stops a run for good because its PR is going away, without touching
+    /// whichever session is open next.
+    func cancelForClose() {
+        guard isRunning else { return }
+        cancel()
     }
 
     func cancel() {

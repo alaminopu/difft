@@ -375,11 +375,14 @@ struct StatusBar: View {
             Button { showShortcuts.toggle() } label: {
                 HStack(spacing: 6) {
                     Text("Keyboard shortcuts")
-                    KeyCap("?")
+                    // "?" was drawn here with nothing listening for it. A bare
+                    // "?" cannot be: it is also text, typed into every field.
+                    KeyCap("\u{2318}/")
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .keyboardShortcut("/", modifiers: .command)
             .popover(isPresented: $showShortcuts, arrowEdge: .top) { ShortcutSheet() }
         }
         .font(Typography.meta)
@@ -413,6 +416,7 @@ struct ShortcutSheet: View {
             ("\u{2325}\u{2318}0", "Review queue"),
             ("\u{2318}R", "Refresh the pull request"),
             ("\u{2318},", "Settings"),
+            ("\u{2318}/", "These shortcuts"),
         ]),
     ]
 

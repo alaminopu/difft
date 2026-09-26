@@ -188,6 +188,9 @@ final class AppModel: ObservableObject {
 
     /// Back to the pull request list.
     func closePullRequest() {
+        // A run left going would write its results into a session nobody can
+        // see, then save it over the one reopened in its place.
+        agent.cancelForClose()
         // What was just done in the session is what the list should now say.
         if session != nil { loadReviewProgress() }
         session = nil
@@ -641,6 +644,7 @@ final class AppModel: ObservableObject {
 
     func openPR(_ pr: PullRequest) async {
         guard let repoDir, openingPR == nil else { return }
+        if session != nil { agent.cancelForClose() }
         openingPR = pr.number
         openingPRNumber = pr.number
         isLoadingDetails = true
@@ -719,9 +723,13 @@ final class AppModel: ObservableObject {
         // Parsing a full-context diff on the main actor freezes the UI, the
         // same reason the PR diff parses off it.
         let text = r.stdout
-        commitFiles = await Task.detached(priority: .userInitiated) {
+        let parsed = await Task.detached(priority: .userInitiated) {
             DiffParser.parse(text)
         }.value
+        // A big commit takes a while; clicking another meanwhile used to land
+        // this one's files under that one's header.
+        guard session.selectedCommit?.sha == commit.sha, self.session === session else { return }
+        commitFiles = parsed
         session.selectedCommitFile = commitFiles.first?.path
         errorBanner = nil
     }
@@ -1102,14 +1110,22 @@ final class AppModel: ObservableObject {
             // so refreshing is the same work as opening — doing it here too
             // fetched the same ref twice.
             let full = await fetchFullContextDiff(repoDir: repoDir, pr: pr, force: true)
+            let refreshedFiles: [FileDiff]
             if let full {
-                files = full.files
+                refreshedFiles = full.files
             } else {
-                files = try await github.fetchDiff(repoDir: repoDir, number: pr.number)
+                refreshedFiles = try await github.fetchDiff(repoDir: repoDir, number: pr.number)
             }
-            comments = await commentsTask
-            commits = await commitsTask
-            reviews = await reviewsTask
+            let refreshedComments = await commentsTask
+            let refreshedCommits = await commitsTask
+            let refreshedReviews = await reviewsTask
+            // A refresh takes seconds. Leaving for another PR meanwhile used to
+            // end with this one's files and threads shown under that one.
+            guard self.session === session else { return }
+            files = refreshedFiles
+            comments = refreshedComments
+            commits = refreshedCommits
+            reviews = refreshedReviews
             let head = full?.head ?? currentHead
             currentHead = head
             // Keep the open file if it still exists in the refreshed diff.
@@ -1123,6 +1139,21 @@ final class AppModel: ObservableObject {
             errorBanner = nil
         } catch {
             errorBanner = "Failed to refresh PR #\(number): \(error.localizedDescription)"
+        }
+    }
+
+    /// A whole folder at once. One call per file copied the viewed set,
+    /// republished the session and wrote the whole session file for each of
+    /// them.
+    func markViewed(_ paths: [String], viewed: Bool) {
+        guard let session, !paths.isEmpty else { return }
+        if viewed {
+            session.data.viewedFiles.formUnion(paths)
+        } else {
+            session.data.viewedFiles.subtract(paths)
+        }
+        sessionStore.saveInBackground(session.data) { [weak self] error in
+            self?.errorBanner = "Failed to save session: \(error.localizedDescription)"
         }
     }
 

@@ -26,6 +26,7 @@ public struct FileDiffView: View {
     // Old/new column balance, draggable via the center divider. Persisted
     // globally (not per file) so it survives file switches and relaunches.
     @AppStorage("diffSplitFraction") private var split = 0.5
+    @EnvironmentObject private var highlighter: HighlightService
     @AppStorage(PrefKey.diffDensity) private var density = DiffDensity.comfortable
 
     fileprivate struct DiffItem: Identifiable, Sendable {
@@ -445,6 +446,7 @@ public struct FileDiffView: View {
                         // frames describe rows that no longer exist, and the
                         // bands the reader opened were in the previous file.
                         notice = nil
+                        prewarmHighlighting()
                         expandedRegions = []
                         shownItems = built.items
                         guard !built.allRows.isEmpty else { return }
@@ -666,6 +668,22 @@ public struct FileDiffView: View {
         let target = "r\(row.id)"
         DispatchQueue.main.async { proxy.scrollTo(target, anchor: .center) }
         onFocused()
+    }
+
+    /// Hands the file's lines to the background highlighter, starting where
+    /// the view opens — the first change — so the rows on screen are first.
+    private func prewarmHighlighting() {
+        let rows = built.allRows
+        guard !rows.isEmpty else { return }
+        let start = rows.firstIndex { ChangeBlock.kind(of: $0) != nil } ?? 0
+        let from = max(0, start - 20)
+        var lines: [String] = []
+        lines.reserveCapacity(rows.count * 2)
+        for row in rows[from...] + rows[..<from] {
+            if let l = row.left { lines.append(l.text) }
+            if let r = row.right { lines.append(r.text) }
+        }
+        highlighter.prewarm(lines, language: HighlightService.language(forPath: file.path))
     }
 
     /// Puts the opened bands' rows back in place.

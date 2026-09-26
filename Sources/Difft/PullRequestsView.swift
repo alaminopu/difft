@@ -145,6 +145,9 @@ struct PullRequestsView: View {
     /// How often the list re-asks while it is on screen. A PR opened in the
     /// browser used to require quitting the app to appear.
     private static let pollInterval = Duration.seconds(60)
+    /// Coming back within this long does not reload the list again.
+    private static let activationCooldown: TimeInterval = 20
+    @State private var lastActivationLoad = Date.distantPast
 
     private var query: PRQuery {
         PRQuery(scope: model.prScope, search: model.prSearch, authors: model.prAuthors.sorted())
@@ -211,6 +214,10 @@ struct PullRequestsView: View {
         // already be in the list.
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Not on every switch: flicking between apps ran a GitHub search
+            // each time, on top of the poll.
+            guard Date().timeIntervalSince(lastActivationLoad) > Self.activationCooldown else { return }
+            lastActivationLoad = Date()
             Task { await model.loadPRs(silent: true) }
         }
     }
@@ -284,7 +291,7 @@ struct PullRequestsView: View {
         LazyVStack(spacing: 0) {
             ForEach(Array(model.prs.enumerated()), id: \.element.id) { index, pr in
                 if index > 0 { Rectangle().fill(Palette.hairline).frame(height: 1) }
-                PRRow(pr: pr, opening: model.openingPRNumber == pr.number,
+                PRRow(model: model, pr: pr, opening: model.openingPRNumber == pr.number,
                       progress: model.reviewProgress[pr.number])
                     .id(pr.number)
             }
@@ -329,7 +336,10 @@ private extension PRScope {
 
 /// One pull request: what it is, whose, and how far through it you are.
 private struct PRRow: View {
-    @EnvironmentObject var model: AppModel
+    /// Held, not observed: the row uses the model only to act. As an
+    /// environment object every row re-rendered on anything the model
+    /// published — each keystroke in a search field, each loading flag.
+    let model: AppModel
     let pr: PullRequest
     let opening: Bool
     let progress: ReviewProgress?

@@ -54,7 +54,7 @@ struct FileTreeView: View {
                                           toggle: { expansion[node.id] = !expanded },
                                           setViewed: { setViewed(node, $0) })
                             case .file(let file, let directory):
-                                FileRow(file: file, directory: directory, depth: row.depth,
+                                FileRow(model: model, file: file, directory: directory, depth: row.depth,
                                         isViewed: viewed.contains(file.path),
                                         isSelected: session.pane == .diff
                                             && session.selectedFile == file.path,
@@ -177,21 +177,40 @@ struct FileTreeView: View {
             }
         }
 
-        var rows: [Row] = []
-        func files(under node: FileTreeNode) -> [FileDiff] {
-            if let file = node.file { return [file] }
-            return (node.children ?? []).flatMap(files(under:))
+        // What each folder holds, gathered in one pass from the leaves up.
+        // Collecting every folder's files afresh walked each subtree again for
+        // every folder above it, and tested each file against the filter once
+        // per ancestor — files × depth work on every render and keystroke.
+        struct Summary { var visible = false; var left = 0; var holdsSelection = false }
+        var summaries: [String: Summary] = [:]
+        @discardableResult
+        func summarize(_ node: FileTreeNode) -> Summary {
+            if let file = node.file {
+                return Summary(visible: shows(file), left: viewed.contains(file.path) ? 0 : 1,
+                               holdsSelection: file.path == selected)
+            }
+            var total = Summary()
+            for child in node.children ?? [] {
+                let sub = summarize(child)
+                total.visible = total.visible || sub.visible
+                total.left += sub.left
+                total.holdsSelection = total.holdsSelection || sub.holdsSelection
+            }
+            summaries[node.id] = total
+            return total
         }
+        model.fileTree.forEach { summarize($0) }
+
+        var rows: [Row] = []
         func walk(_ nodes: [FileTreeNode], depth: Int) {
             for node in nodes {
                 if let file = node.file {
                     if shows(file) { rows.append(Row(id: file.path, depth: depth, kind: .file(file, directory: nil))) }
                     continue
                 }
-                let inside = files(under: node)
-                guard inside.contains(where: shows) else { continue }
-                let left = inside.count { !viewed.contains($0.path) }
-                let holdsSelection = inside.contains { $0.path == selected }
+                guard let summary = summaries[node.id], summary.visible else { continue }
+                let left = summary.left
+                let holdsSelection = summary.holdsSelection
                 // A search has to show what it found; a folder holding the
                 // open file must not fold up around it.
                 let expanded = !term.isEmpty
@@ -216,11 +235,13 @@ struct FileTreeView: View {
     }
 
     private func setViewed(_ node: FileTreeNode, _ viewed: Bool) {
-        func apply(_ node: FileTreeNode) {
-            if let file = node.file { model.markViewed(file.path, viewed: viewed) }
-            node.children?.forEach(apply)
+        var paths: [String] = []
+        func collect(_ node: FileTreeNode) {
+            if let file = node.file { paths.append(file.path) }
+            node.children?.forEach(collect)
         }
-        apply(node)
+        collect(node)
+        model.markViewed(paths, viewed: viewed)
     }
 }
 
@@ -282,7 +303,10 @@ private struct FolderRow: View {
 // MARK: - File
 
 private struct FileRow: View {
-    @EnvironmentObject var model: AppModel
+    /// Held, not observed: the row uses the model only to act. As an
+    /// environment object every row re-rendered on anything the model
+    /// published — each keystroke in a search field, each loading flag.
+    let model: AppModel
     let file: FileDiff
     /// Shown beside the name in the flat list, where no folder row says it.
     let directory: String?
