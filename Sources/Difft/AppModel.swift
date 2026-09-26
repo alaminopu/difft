@@ -365,6 +365,7 @@ final class AppModel: ObservableObject {
             guard token == prLoadToken else { return }
             prs = found
             prsTruncated = filledPage
+            prefetchHeads(of: found, repoDir: repoDir)
             // The minute-by-minute poll re-read every saved session each time.
             // Progress only changes when a PR is reviewed, which reloads it on
             // the way back to this list, or when the list itself changes.
@@ -432,9 +433,13 @@ final class AppModel: ObservableObject {
         for chunk in stride(from: 0, to: files.count, by: 500).map({
             Array(files[$0..<min($0 + 500, files.count)])
         }) {
+            // From the index rather than the files: a checkout just made has
+            // its index but not its files yet (see WorktreeManager), and the
+            // two agree on `.gitattributes` otherwise.
             guard let r = try? await processRunner.run(
                     "git",
-                    arguments: ["check-attr", "-z"] + GitAttributes.queried + ["--"] + chunk.map(\.path),
+                    arguments: ["check-attr", "--cached", "-z"] + GitAttributes.queried
+                        + ["--"] + chunk.map(\.path),
                     currentDirectory: worktree),
                   r.exitCode == 0 else { continue }
             attributes.merge(GitAttributes.parse(r.stdout)) { _, new in new }
@@ -498,6 +503,8 @@ final class AppModel: ObservableObject {
             if !force, let expected = pr.headRefOid, !expected.isEmpty,
                let local = await worktrees.currentHead(repoName: repoName, prNumber: pr.number),
                local == expected {
+                // An earlier open may have quit before its files were written.
+                completeCheckoutInBackground(worktrees, prNumber: pr.number)
                 let wt = worktrees.worktreeURL(repoName: repoName, prNumber: pr.number)
                 guard let baseRef = await resolveBase(pr: pr, base: base,
                                                       remote: remote, worktree: wt),
@@ -508,8 +515,13 @@ final class AppModel: ObservableObject {
 
             let head: String
             do {
+                // The head the list reported is used when the prefetch already
+                // brought it in; an explicit refresh asks the network. The
+                // files are written after the diff is on screen.
                 head = try await worktrees.refreshWorktree(
-                    cloneDir: repoDir, repoName: repoName, prNumber: pr.number, remote: remote)
+                    cloneDir: repoDir, repoName: repoName, prNumber: pr.number, remote: remote,
+                    expectedHead: force ? nil : pr.headRefOid, deferCheckout: true)
+                completeCheckoutInBackground(worktrees, prNumber: pr.number)
             } catch WorktreeError.localChanges {
                 // An applied fix is sitting in the checkout. Show the PR as it
                 // stands rather than resetting over work the user was told to
@@ -525,6 +537,45 @@ final class AppModel: ObservableObject {
             else { return nil }
             return FullDiff(files: files, head: head)
         } catch { return nil }
+    }
+
+    /// Writes out the files of a checkout made without them, off the open's
+    /// critical path. Claude runs and refreshes wait for it themselves.
+    private func completeCheckoutInBackground(_ worktrees: WorktreeManager, prNumber: Int) {
+        let name = repoName
+        Task.detached(priority: .utility) {
+            try? await worktrees.completeCheckout(repoName: name, prNumber: prNumber)
+        }
+    }
+
+    /// Heads the prefetch is already fetching, so the list's reloads do not
+    /// stack fetches on a slow network.
+    private var isPrefetching = false
+
+    /// Brings the listed PRs' heads into Difft's clone in the background, so
+    /// opening one needs no network. Best effort: a failure only means the
+    /// open fetches for itself, as it always did.
+    private func prefetchHeads(of prs: [PullRequest], repoDir: URL) {
+        guard !isPrefetching else { return }
+        var heads: [Int: String] = [:]
+        // The top of the list is what gets opened; a page of a hundred merged
+        // PRs is not worth fetching.
+        for pr in prs.prefix(30) {
+            if let oid = pr.headRefOid, !oid.isEmpty, pr.state?.uppercased() != "MERGED" {
+                heads[pr.number] = oid
+            }
+        }
+        guard !heads.isEmpty else { return }
+        isPrefetching = true
+        let name = repoName, runner = processRunner
+        let baseDir = Self.appSupportDir.appendingPathComponent("worktrees")
+        Task {
+            defer { isPrefetching = false }
+            let remote = await remoteName(repoDir: repoDir)
+            let worktrees = WorktreeManager(runner: runner, baseDir: baseDir)
+            _ = try? await worktrees.prefetch(cloneDir: repoDir, repoName: name,
+                                              remote: remote, heads: heads)
+        }
     }
 
     private func parseDiff(worktree: URL, baseRef: String, remote: String) async -> [FileDiff]? {

@@ -49,8 +49,31 @@ public final class WorktreeManager: Sendable {
         reposDir.appendingPathComponent("\(repoName).git")
     }
 
+    /// The PR's checkout with every file written, for anything that reads the
+    /// working tree — which is what Claude does.
     public func ensureWorktree(cloneDir: URL, repoName: String, prNumber: Int,
                                remote: String = "origin") async throws -> URL {
+        let target = try await makeWorktree(cloneDir: cloneDir, repoName: repoName,
+                                            prNumber: prNumber, remote: remote,
+                                            expectedHead: nil).url
+        try await completeCheckout(at: target)
+        return target
+    }
+
+    /// The checkout, and whether this call created it.
+    ///
+    /// A new checkout is made without its files. Everything that opening a PR
+    /// needs — the diff, the head, the attributes — reads git's objects and
+    /// index, and writing out a large repository's files was the slowest
+    /// step of the open: 1.4–2.1s for baserow's ten thousand, against 0.1s
+    /// for the index alone. `completeCheckout(at:)` writes them, and every
+    /// path that reads the working tree calls it first.
+    ///
+    /// - Parameter expectedHead: the commit GitHub reports as the PR head.
+    ///   When `prefetch` has already brought it into the repository, the
+    ///   checkout is made from it without going to the network.
+    private func makeWorktree(cloneDir: URL, repoName: String, prNumber: Int,
+                              remote: String, expectedHead: String?) async throws -> (url: URL, created: Bool) {
         let repo = try await ensureRepo(cloneDir: cloneDir, repoName: repoName, remote: remote)
         let target = worktreeURL(repoName: repoName, prNumber: prNumber)
         if FileManager.default.fileExists(atPath: target.path) {
@@ -60,17 +83,128 @@ public final class WorktreeManager: Sendable {
                 try? FileManager.default.removeItem(at: target)
             } else {
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
-                return target
+                return (target, false)
             }
         }
         let branch = "difft-pr-\(prNumber)"
         let prune = try await runner.run("git", arguments: ["worktree", "prune"], currentDirectory: repo)
         guard prune.exitCode == 0 else { throw WorktreeError.commandFailed(prune.stderr) }
-        let fetch = try await runner.run("git", arguments: ["fetch", remote, "+pull/\(prNumber)/head:\(branch)"], currentDirectory: repo)
-        guard fetch.exitCode == 0 else { throw WorktreeError.commandFailed(fetch.stderr) }
-        let add = try await runner.run("git", arguments: ["worktree", "add", target.path, branch], currentDirectory: repo)
-        guard add.exitCode == 0 else { throw WorktreeError.commandFailed(add.stderr) }
-        return target
+        if let expectedHead, await hasCommit(expectedHead, in: repo) {
+            _ = try await git(["branch", "-f", branch, expectedHead], in: repo)
+        } else {
+            let fetch = try await runner.run("git", arguments: ["fetch", remote, "+pull/\(prNumber)/head:\(branch)"], currentDirectory: repo)
+            guard fetch.exitCode == 0 else { throw WorktreeError.commandFailed(fetch.stderr) }
+        }
+        // Marked before the checkout exists, so a checkout cut short — the app
+        // quit between here and `completeCheckout` — is still known to be
+        // missing its files.
+        markCheckoutPending(target)
+        let add = try await runner.run("git", arguments: ["worktree", "add", "--no-checkout", target.path, branch], currentDirectory: repo)
+        guard add.exitCode == 0 else {
+            clearCheckoutPending(target)
+            throw WorktreeError.commandFailed(add.stderr)
+        }
+        // The index, without the files: cheap, and it is what `check-attr
+        // --cached` reads the repository's attributes from.
+        let index = try await runner.run("git", arguments: ["read-tree", "HEAD"], currentDirectory: target)
+        guard index.exitCode == 0 else { throw WorktreeError.commandFailed(index.stderr) }
+        return (target, true)
+    }
+
+    // MARK: - Deferred checkout
+
+    /// Where the "files not written yet" markers live: beside the checkouts
+    /// rather than among them, so the age sweep never takes one for a
+    /// checkout, and outside the working tree, where Claude would see it.
+    private var pendingDir: URL {
+        reposDir.deletingLastPathComponent().appendingPathComponent("pending-checkouts")
+    }
+
+    private func pendingMarker(_ target: URL) -> URL {
+        pendingDir.appendingPathComponent(target.lastPathComponent)
+    }
+
+    private func markCheckoutPending(_ target: URL) {
+        try? FileManager.default.createDirectory(at: pendingDir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: pendingMarker(target).path, contents: nil)
+    }
+
+    private func clearCheckoutPending(_ target: URL) {
+        try? FileManager.default.removeItem(at: pendingMarker(target))
+    }
+
+    /// Writes out the files of a checkout made without them. Returns at once
+    /// when there is nothing to write, so any caller may use it as a guard.
+    public func completeCheckout(repoName: String, prNumber: Int) async throws {
+        try await completeCheckout(at: worktreeURL(repoName: repoName, prNumber: prNumber))
+    }
+
+    private func completeCheckout(at target: URL) async throws {
+        guard FileManager.default.fileExists(atPath: pendingMarker(target).path) else { return }
+        let runner = runner, marker = pendingMarker(target)
+        // One writer per checkout: the background completion after an open,
+        // a Claude run and a refresh can all ask at once, and two `reset`s in
+        // one checkout fight over its index lock.
+        try await Self.checkouts.run(target.path) {
+            guard FileManager.default.fileExists(atPath: marker.path) else { return }
+            // Nothing in this checkout is anyone's work yet: it has never had
+            // files. The reset writes HEAD's.
+            let r = try await runner.run("git", arguments: ["reset", "--hard", "--quiet", "HEAD"],
+                                         currentDirectory: target)
+            guard r.exitCode == 0 else { throw WorktreeError.commandFailed(r.stderr) }
+            try? FileManager.default.removeItem(at: marker)
+        }
+    }
+
+    private static let checkouts = CheckoutGate()
+
+    // MARK: - Prefetch
+
+    /// Brings the given PR heads into Difft's clone ahead of time, in one
+    /// fetch, so opening any of them needs no network at all.
+    ///
+    /// Fetching a PR's head was most of what was left of opening it — 1.7 to
+    /// 2.6s on baserow, nearly all handshake — and one fetch for thirty heads
+    /// costs about what one fetch for one does. Heads already present are
+    /// skipped, so the list's minute-by-minute reload costs a local lookup
+    /// unless someone pushed. Returns how many heads were fetched.
+    @discardableResult
+    public func prefetch(cloneDir: URL, repoName: String, remote: String = "origin",
+                         heads: [Int: String]) async throws -> Int {
+        guard !heads.isEmpty else { return 0 }
+        let repo = try await ensureRepo(cloneDir: cloneDir, repoName: repoName, remote: remote)
+        let present = await presentCommits(Array(heads.values), in: repo)
+        let missing = heads.filter { !present.contains($0.value) }.keys.sorted()
+        guard !missing.isEmpty else { return 0 }
+        // Under refs of Difft's own, so they survive gc and stay out of the
+        // `difft-pr-*` branches the checkouts sit on. FETCH_HEAD is left
+        // alone: a PR open fetching at the same moment reads its own.
+        let specs = missing.map { "+pull/\($0)/head:refs/difft/pr/\($0)" }
+        _ = try await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote] + specs,
+                          in: repo)
+        return missing.count
+    }
+
+    /// Which of `oids` the repository already has, in one process.
+    private func presentCommits(_ oids: [String], in repo: URL) async -> Set<String> {
+        let input = Data(oids.map { $0 + "^{commit}\n" }.joined().utf8)
+        guard let r = try? await runner.run("git", arguments: ["cat-file", "--batch-check"],
+                                            currentDirectory: repo, stdin: input),
+              r.exitCode == 0 else { return [] }
+        // "<oid> commit <size>" for a hit, "<name> missing" for a miss, in
+        // input order.
+        var present = Set<String>()
+        for (oid, line) in zip(oids, r.stdout.split(separator: "\n")) where !line.hasSuffix(" missing") {
+            present.insert(oid)
+        }
+        return present
+    }
+
+    private func hasCommit(_ oid: String, in dir: URL) async -> Bool {
+        guard !oid.isEmpty,
+              let r = try? await runner.run("git", arguments: ["cat-file", "-e", "\(oid)^{commit}"],
+                                            currentDirectory: dir) else { return false }
+        return r.exitCode == 0
     }
 
     /// Difft's private clone of `cloneDir`, made on first use.
@@ -153,21 +287,48 @@ public final class WorktreeManager: Sendable {
     /// Re-fetches the PR head into an existing worktree and hard-resets to
     /// it, so a PR opened earlier picks up commits pushed since. Returns the
     /// resulting HEAD sha. Creates the worktree first if it is missing.
+    ///
+    /// - Parameters:
+    ///   - expectedHead: the head GitHub reports. When the repository already
+    ///     has it (see `prefetch`), it is used without a fetch. An explicit
+    ///     refresh passes nil so that it asks the network.
+    ///   - deferCheckout: leave a new checkout's files unwritten, for a caller
+    ///     that only reads git's objects and will call `completeCheckout`.
     @discardableResult
     public func refreshWorktree(cloneDir: URL, repoName: String, prNumber: Int,
-                                remote: String = "origin") async throws -> String {
-        let target = try await ensureWorktree(cloneDir: cloneDir, repoName: repoName,
-                                              prNumber: prNumber, remote: remote)
-        // Fetch from inside the worktree without naming a destination branch:
-        // git refuses to fetch into a branch that is checked out somewhere.
-        // FETCH_HEAD then holds the PR head, and reset moves both the working
-        // copy and the checked-out branch to it.
-        let fetch = try await runner.run(
-            "git", arguments: ["fetch", remote, "pull/\(prNumber)/head"],
-            currentDirectory: target)
-        guard fetch.exitCode == 0 else { throw WorktreeError.commandFailed(fetch.stderr) }
+                                remote: String = "origin", expectedHead: String? = nil,
+                                deferCheckout: Bool = false) async throws -> String {
+        let (target, created) = try await makeWorktree(cloneDir: cloneDir, repoName: repoName,
+                                                       prNumber: prNumber, remote: remote,
+                                                       expectedHead: expectedHead)
+        // A checkout made just now was fetched to make it. Fetching the same
+        // head again was a second network round trip on every first open of a
+        // PR — about 1.5s on a large repository — to learn nothing.
+        if created {
+            if !deferCheckout { try await completeCheckout(at: target) }
+            return try await revParse("HEAD", in: target)
+        }
+        // A checkout with no files reads as every file deleted, which the
+        // dirty check below would take for an applied fix.
+        try await completeCheckout(at: target)
 
-        let fetched = try await revParse("FETCH_HEAD", in: target)
+        let fetched: String
+        let resetTarget: String
+        if let expectedHead, await hasCommit(expectedHead, in: target) {
+            fetched = expectedHead
+            resetTarget = expectedHead
+        } else {
+            // Fetch from inside the worktree without naming a destination
+            // branch: git refuses to fetch into a branch that is checked out
+            // somewhere. FETCH_HEAD then holds the PR head, and reset moves
+            // both the working copy and the checked-out branch to it.
+            let fetch = try await runner.run(
+                "git", arguments: ["fetch", remote, "pull/\(prNumber)/head"],
+                currentDirectory: target)
+            guard fetch.exitCode == 0 else { throw WorktreeError.commandFailed(fetch.stderr) }
+            fetched = try await revParse("FETCH_HEAD", in: target)
+            resetTarget = "FETCH_HEAD"
+        }
         let current = try await revParse("HEAD", in: target)
         // Nothing moved: resetting would be pure destruction — it is how an
         // ordinary re-open used to wipe an applied fix out of the worktree.
@@ -175,7 +336,7 @@ public final class WorktreeManager: Sendable {
         if try await isDirty(target) { throw WorktreeError.localChanges }
 
         let reset = try await runner.run(
-            "git", arguments: ["reset", "--hard", "FETCH_HEAD"], currentDirectory: target)
+            "git", arguments: ["reset", "--hard", resetTarget], currentDirectory: target)
         guard reset.exitCode == 0 else { throw WorktreeError.commandFailed(reset.stderr) }
         return try await revParse("HEAD", in: target)
     }
@@ -225,5 +386,19 @@ public final class WorktreeManager: Sendable {
             }
         }
         return removed
+    }
+}
+
+/// Runs at most one piece of work per key at a time; a caller arriving while
+/// it runs waits for that run instead of starting another.
+private actor CheckoutGate {
+    private var running: [String: Task<Void, Error>] = [:]
+
+    func run(_ key: String, _ work: @escaping @Sendable () async throws -> Void) async throws {
+        if let existing = running[key] { return try await existing.value }
+        let task = Task { try await work() }
+        running[key] = task
+        defer { running[key] = nil }
+        try await task.value
     }
 }

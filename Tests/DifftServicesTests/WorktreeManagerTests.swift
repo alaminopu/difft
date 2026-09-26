@@ -28,14 +28,16 @@ final class WorktreeManagerTests: XCTestCase {
         let mgr = manager(fake, baseDir: base, repoName: "myrepo")
         let clone = URL(fileURLWithPath: "/tmp/clone")
         _ = try await mgr.ensureWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 4)
-        XCTAssertEqual(fake.calls.count, 3)
-        XCTAssertEqual(fake.calls[0].executable, "git")
-        XCTAssertEqual(fake.calls[0].arguments, ["worktree", "prune"])
-        XCTAssertEqual(fake.calls[1].executable, "git")
-        XCTAssertEqual(fake.calls[1].arguments, ["fetch", "origin", "+pull/4/head:difft-pr-4"])
-        XCTAssertEqual(fake.calls[2].executable, "git")
-        XCTAssertEqual(fake.calls[2].arguments,
-                       ["worktree", "add", mgr.worktreeURL(repoName: "myrepo", prNumber: 4).path, "difft-pr-4"])
+        XCTAssertTrue(fake.calls.allSatisfy { $0.executable == "git" })
+        // Made without its files, then — because this caller reads the
+        // working tree — completed before returning.
+        XCTAssertEqual(fake.calls.map(\.arguments), [
+            ["worktree", "prune"],
+            ["fetch", "origin", "+pull/4/head:difft-pr-4"],
+            ["worktree", "add", "--no-checkout", mgr.worktreeURL(repoName: "myrepo", prNumber: 4).path, "difft-pr-4"],
+            ["read-tree", "HEAD"],
+            ["reset", "--hard", "--quiet", "HEAD"],
+        ])
     }
 
     func testEnsureWorktreeSkipsWhenDirExists() async throws {
@@ -116,6 +118,30 @@ final class WorktreeManagerTests: XCTestCase {
             ["reset", "--hard", "FETCH_HEAD"],
             ["rev-parse", "HEAD"],
         ])
+    }
+
+    /// A checkout made by this call was fetched to make it. Fetching the same
+    /// head a second time cost a network round trip on every first open.
+    func testRefreshDoesNotFetchAgainAfterCreatingTheWorktree() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fake = FakeProcessRunner()
+        fake.responses = [
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // worktree prune
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // fetch +pull/9/head
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // worktree add
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // read-tree
+            ProcessResult(stdout: "", stderr: "", exitCode: 0),             // reset: write files
+            ProcessResult(stdout: "abc1234def\n", stderr: "", exitCode: 0),  // rev-parse HEAD
+        ]
+        let mgr = manager(fake, baseDir: dir, repoName: "repo")
+        let head = try await mgr.refreshWorktree(
+            cloneDir: URL(fileURLWithPath: "/tmp/clone"), repoName: "repo", prNumber: 9)
+
+        XCTAssertEqual(head, "abc1234def")
+        XCTAssertEqual(fake.calls.filter { $0.arguments.first == "fetch" }.count, 1)
+        XCTAssertEqual(fake.calls.last?.arguments, ["rev-parse", "HEAD"])
     }
 
     /// The PR has not moved, so there is nothing to reset to — and resetting
@@ -258,6 +284,65 @@ final class WorktreeManagerTests: XCTestCase {
         // A later refresh fetches through the private clone's own remote.
         let refreshed = try await mgr.refreshWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 7)
         XCTAssertEqual(refreshed, prHead)
+    }
+
+    /// Opening a PR reads only git's objects, so its checkout is made without
+    /// files. Nothing that reads files may see it that way: `ensureWorktree`
+    /// (Claude's way in) and a refresh complete it first — and a refresh must
+    /// not take the missing files for an applied fix.
+    func testDeferredCheckoutIsCompletedBeforeAnythingReadsFiles() async throws {
+        let (_, clone, prHead) = try await makeUpstreamAndClone()
+        let mgr = WorktreeManager(runner: DefaultProcessRunner(),
+                                  baseDir: base.appendingPathComponent("support/worktrees"))
+
+        let head = try await mgr.refreshWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 7,
+                                                 deferCheckout: true)
+        XCTAssertEqual(head, prHead)
+        let wt = mgr.worktreeURL(repoName: "myrepo", prNumber: 7)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wt.appendingPathComponent("pr.txt").path))
+        // The index is there, which is what attribute lookups read.
+        let tracked = try await sh(["ls-files"], in: wt)
+        XCTAssertEqual(tracked, "pr.txt")
+
+        let refreshed = try await mgr.refreshWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 7)
+        XCTAssertEqual(refreshed, prHead)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wt.appendingPathComponent("pr.txt").path))
+        let status = try await sh(["status", "--porcelain"], in: wt)
+        XCTAssertEqual(status, "")
+    }
+
+    func testEnsureWorktreeAlwaysReturnsFiles() async throws {
+        let (_, clone, _) = try await makeUpstreamAndClone()
+        let mgr = WorktreeManager(runner: DefaultProcessRunner(),
+                                  baseDir: base.appendingPathComponent("support/worktrees"))
+        _ = try await mgr.refreshWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 7,
+                                          deferCheckout: true)
+        let wt = try await mgr.ensureWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 7)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wt.appendingPathComponent("pr.txt").path))
+    }
+
+    /// A prefetched head opens without the network: the PR ref is deleted
+    /// upstream after the prefetch, and the checkout still reaches it.
+    func testPrefetchedHeadOpensWithoutFetching() async throws {
+        let (upstream, clone, _) = try await makeUpstreamAndClone()
+        // A head reachable only from its PR ref, as a fork's is: the user's
+        // clone has never seen it.
+        let tree = try await sh(["rev-parse", "main^{tree}"], in: upstream)
+        let prHead = try await sh(["-c", "user.name=t", "-c", "user.email=t@t",
+                                   "commit-tree", tree, "-p", "main", "-m", "fork"], in: upstream)
+        try await sh(["update-ref", "refs/pull/8/head", prHead], in: upstream)
+        let mgr = WorktreeManager(runner: DefaultProcessRunner(),
+                                  baseDir: base.appendingPathComponent("support/worktrees"))
+
+        let fetched = try await mgr.prefetch(cloneDir: clone, repoName: "myrepo", heads: [8: prHead])
+        XCTAssertEqual(fetched, 1)
+        let again = try await mgr.prefetch(cloneDir: clone, repoName: "myrepo", heads: [8: prHead])
+        XCTAssertEqual(again, 0, "a head already present is not fetched again")
+
+        try await sh(["update-ref", "-d", "refs/pull/8/head"], in: upstream)
+        let head = try await mgr.refreshWorktree(cloneDir: clone, repoName: "myrepo", prNumber: 8,
+                                                 expectedHead: prHead, deferCheckout: true)
+        XCTAssertEqual(head, prHead)
     }
 
     /// Earlier versions hung worktrees and `difft-pr-*` branches off the
